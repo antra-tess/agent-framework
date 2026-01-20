@@ -15,6 +15,11 @@ import type {
   InferenceLogQueryResult,
   InferenceLogEntryWithId,
   InferenceLogSummary,
+  EventLogEntry,
+  EventLogQuery,
+  EventLogQueryResult,
+  EventLogEntryWithId,
+  EventLogSummary,
   QueueEvent,
   EventResponse,
   ModuleEventResponse,
@@ -31,6 +36,7 @@ import { ModuleRegistry } from './module-registry.js';
 
 const FRAMEWORK_STATE_ID = 'framework/state';
 const INFERENCE_LOG_ID = 'framework/inference-log';
+const EVENT_LOG_ID = 'framework/event-log';
 
 /**
  * Default inference policy - infer if any request exists for the agent.
@@ -417,6 +423,136 @@ export class AgentFramework {
   }
 
   /**
+   * Query event logs.
+   * Returns entries with summary info (doesn't resolve blobs).
+   */
+  queryEventLogs(query?: EventLogQuery): EventLogQueryResult {
+    const limit = query?.limit ?? 50;
+    const offset = query?.offset ?? 0;
+    const pattern = query?.pattern ? new RegExp(query.pattern, 'i') : null;
+
+    const allEntries: EventLogEntryWithId[] = [];
+    const stateInfo = this.store.listStates().find((s) => s.id === EVENT_LOG_ID);
+
+    if (stateInfo) {
+      const data = this.store.getStateJson(EVENT_LOG_ID);
+      if (Array.isArray(data)) {
+        for (let i = 0; i < data.length; i++) {
+          const entry = data[i] as EventLogEntry;
+
+          // Build summary
+          const responsesIsBlob = !!(
+            entry.responses &&
+            typeof entry.responses === 'object' &&
+            'blobId' in entry.responses
+          );
+
+          // Extract summary info from responses if not a blob
+          let moduleCount = 0;
+          const modulesRequestingInference: string[] = [];
+          const modulesAddingMessages: string[] = [];
+
+          if (!responsesIsBlob && Array.isArray(entry.responses)) {
+            moduleCount = entry.responses.length;
+            for (const { moduleName, response } of entry.responses) {
+              if (response.requestInference) {
+                modulesRequestingInference.push(moduleName);
+              }
+              if (response.addMessages?.length) {
+                modulesAddingMessages.push(moduleName);
+              }
+            }
+          }
+
+          const summary: EventLogSummary = {
+            timestamp: entry.timestamp,
+            eventType: entry.event.type,
+            moduleCount,
+            modulesRequestingInference,
+            modulesAddingMessages,
+            responsesIsBlob,
+          };
+
+          allEntries.push({ sequence: i, entry, summary });
+        }
+      }
+    }
+
+    // Filter entries
+    let filtered = allEntries;
+
+    if (query?.eventType) {
+      filtered = filtered.filter((e) => e.entry.event.type === query.eventType);
+    }
+
+    if (query?.moduleName) {
+      filtered = filtered.filter((e) => {
+        if (e.summary?.responsesIsBlob) return false;
+        const responses = e.entry.responses as ModuleEventResponse[];
+        return responses.some((r) => r.moduleName === query.moduleName);
+      });
+    }
+
+    if (pattern) {
+      filtered = filtered.filter((e) => {
+        const content = JSON.stringify(e.summary);
+        return pattern.test(content);
+      });
+    }
+
+    // Reverse to get most recent first
+    filtered = filtered.reverse();
+
+    // Paginate
+    const total = filtered.length;
+    const paged = filtered.slice(offset, offset + limit);
+
+    return {
+      entries: paged,
+      total,
+      hasMore: offset + limit < total,
+    };
+  }
+
+  /**
+   * Get a specific event log entry by sequence number.
+   * Resolves blob references to full content.
+   */
+  getEventLog(sequence: number, resolveBlobs = true): EventLogEntryWithId | null {
+    const data = this.store.getStateJson(EVENT_LOG_ID);
+    if (Array.isArray(data) && sequence >= 0 && sequence < data.length) {
+      const entry = data[sequence] as EventLogEntry;
+
+      if (resolveBlobs && entry.responses && typeof entry.responses === 'object' && 'blobId' in entry.responses) {
+        const resolved = { ...entry };
+        const blob = this.store.getBlob((entry.responses as { blobId: string }).blobId);
+        if (blob) {
+          try {
+            resolved.responses = JSON.parse(blob.toString());
+          } catch {
+            resolved.responses = [];
+          }
+        }
+        return { sequence, entry: resolved };
+      }
+
+      return { sequence, entry };
+    }
+    return null;
+  }
+
+  /**
+   * Get the most recent event logs (tail).
+   */
+  tailEventLogs(count = 10, eventType?: string): EventLogEntryWithId[] {
+    const result = this.queryEventLogs({
+      limit: count,
+      eventType,
+    });
+    return result.entries;
+  }
+
+  /**
    * Run until the queue is empty and all agents are idle.
    * Useful for testing.
    */
@@ -507,8 +643,9 @@ export class AgentFramework {
       }
     }
 
-    // Emit for observability
+    // Emit for observability and log to Chronicle
     this.emit({ type: 'event:handled', event, responses });
+    this.logEvent(event, responses);
   }
 
   private async applyEventResponse(response: EventResponse, event: QueueEvent): Promise<void> {
@@ -700,6 +837,30 @@ export class AgentFramework {
     const entries = Array.isArray(data) ? data : [];
     entries.push(entryToStore);
     this.store.setStateJson(INFERENCE_LOG_ID, entries);
+  }
+
+  private logEvent(event: QueueEvent, responses: ModuleEventResponse[]): void {
+    const entry: EventLogEntry = {
+      timestamp: Date.now(),
+      event,
+      responses,
+    };
+
+    // Blob threshold: 10KB
+    const BLOB_THRESHOLD = 10000;
+
+    const entryToStore = { ...entry };
+    const responsesJson = JSON.stringify(responses);
+    if (responsesJson.length > BLOB_THRESHOLD) {
+      const blobId = this.store.storeBlob(Buffer.from(responsesJson), 'application/json');
+      entryToStore.responses = { blobId };
+    }
+
+    // Append to the event log state
+    const data = this.store.getStateJson(EVENT_LOG_ID);
+    const entries = Array.isArray(data) ? data : [];
+    entries.push(entryToStore);
+    this.store.setStateJson(EVENT_LOG_ID, entries);
   }
 
   private dispatchToolCall(agentName: string, call: ToolCall): void {

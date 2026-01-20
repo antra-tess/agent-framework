@@ -140,3 +140,64 @@ export interface InferenceLogEntry {
   /** Stop reason from the model */
   stopReason?: string;
 }
+
+/**
+ * Entry in the event log - records a processed event with all module responses.
+ */
+export interface EventLogEntry {
+  timestamp: number;
+  /** The event that was processed */
+  event: QueueEvent;
+  /** Responses from all modules, or blob ID if large */
+  responses: ModuleEventResponse[] | { blobId: string };
+}
+
+/**
+ * Query options for event logs.
+ */
+export interface EventLogQuery {
+  /** Filter by event type */
+  eventType?: string;
+  /** Filter by module name (modules that responded) */
+  moduleName?: string;
+  /** Max number of logs to return */
+  limit?: number;
+  /** Skip first N logs (for pagination) */
+  offset?: number;
+  /** Search pattern for content (regex) */
+  pattern?: string;
+}
+
+/**
+ * Result from querying event logs.
+ */
+export interface EventLogQueryResult {
+  entries: EventLogEntryWithId[];
+  total: number;
+  hasMore: boolean;
+}
+
+/**
+ * Event log entry with Chronicle sequence ID.
+ */
+export interface EventLogEntryWithId {
+  sequence: number;
+  entry: EventLogEntry;
+  /** Summary for display without resolving blobs */
+  summary?: EventLogSummary;
+}
+
+/**
+ * Summary view of an event log (without full responses).
+ */
+export interface EventLogSummary {
+  timestamp: number;
+  eventType: string;
+  moduleCount: number;
+  /** Modules that requested inference */
+  modulesRequestingInference: string[];
+  /** Modules that added messages */
+  modulesAddingMessages: string[];
+  /** Whether responses are stored as blob */
+  responsesIsBlob: boolean;
+}
