@@ -87,7 +87,8 @@ export type ApiCommand =
   // Event logs
   | 'events.tail'
   | 'events.inspect'
-  | 'events.search';
+  | 'events.search'
+  | 'events.subscribe';
 
 // ============================================================================
 // Command Parameters
@@ -222,6 +223,34 @@ export interface EventsSearchParams {
   offset?: number;
   /** Regex pattern to match against log content */
   pattern?: string;
+}
+
+export interface EventsSubscribeParams {
+  /** Event type patterns to subscribe to (e.g., 'inference:*', 'tool:*') */
+  types?: string[];
+  /** Maximum number of historical events to return (default: 100) */
+  limit?: number;
+}
+
+export interface PersistedEvent {
+  /** Unique event ID */
+  id: string;
+  /** Sequence number in the event log */
+  sequence?: number;
+  /** Event timestamp */
+  timestamp: number;
+  /** Event type */
+  type: string;
+  /** Event payload */
+  payload: unknown;
+  /** Source of the event */
+  source: string;
+  /** ID of event that caused this one */
+  causedBy?: string;
+  /** Agent name (if applicable) */
+  agentName?: string;
+  /** Module name (if applicable) */
+  moduleName?: string;
 }
 
 // --- Subscription Parameters ---

@@ -35,6 +35,8 @@ import type {
   EventsTailParams,
   EventsInspectParams,
   EventsSearchParams,
+  EventsSubscribeParams,
+  PersistedEvent,
   AgentInfo,
   ModuleInfo,
   BranchInfo,
@@ -405,6 +407,8 @@ export class ApiServer {
         return this.cmdEventsInspect(params as unknown as EventsInspectParams);
       case 'events.search':
         return this.cmdEventsSearch(params as unknown as EventsSearchParams);
+      case 'events.subscribe':
+        return this.cmdEventsSubscribe(params as unknown as EventsSubscribeParams);
 
       default:
         throw new Error(`Unknown command: ${command}`);
@@ -761,6 +765,53 @@ export class ApiServer {
     return result;
   }
 
+  private async cmdEventsSubscribe(
+    params?: EventsSubscribeParams
+  ): Promise<{ subscribed: string[]; history: PersistedEvent[] }> {
+    const types = params?.types ?? ['*'];
+    const limit = params?.limit ?? 100;
+
+    // Get historical events from the event log
+    const eventEntries = this.framework.tailEventLogs(limit);
+
+    // Convert EventLogEntry to PersistedEvent format
+    const history: PersistedEvent[] = eventEntries.map((item) => {
+      const { sequence, entry } = item;
+      const event = entry.event;
+      const timestamp = entry.timestamp;
+
+      // Extract agent/module info from event if available
+      const agentName =
+        (event as Record<string, unknown>).agentName as string | undefined;
+      const moduleName =
+        (event as Record<string, unknown>).moduleName as string | undefined;
+
+      return {
+        id: `evt-${sequence}`,
+        sequence,
+        timestamp,
+        type: event?.type ?? 'unknown',
+        payload: event,
+        source: 'chronicle',
+        agentName,
+        moduleName,
+      };
+    });
+
+    // Filter by types if not wildcard
+    const filteredHistory =
+      types.includes('*')
+        ? history
+        : history.filter((evt) =>
+            types.some((pattern) => matchEventType(pattern, evt.type))
+          );
+
+    return {
+      subscribed: types,
+      history: filteredHistory,
+    };
+  }
+
   // ==========================================================================
   // HTTP Handling (optional REST endpoints)
   // ==========================================================================
@@ -948,4 +999,17 @@ export class ApiServer {
       }
     }
   }
+}
+
+/**
+ * Check if an event type matches a pattern.
+ * Supports wildcards like 'inference:*' or exact matches.
+ */
+function matchEventType(pattern: string, eventType: string): boolean {
+  if (pattern === '*') return true;
+  if (pattern.endsWith(':*')) {
+    const prefix = pattern.slice(0, -1);
+    return eventType.startsWith(prefix);
+  }
+  return pattern === eventType;
 }
