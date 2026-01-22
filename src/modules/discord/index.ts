@@ -277,6 +277,16 @@ export class DiscordModule implements Module {
   }
 
   async onEvent(event: QueueEvent): Promise<EventResponse> {
+    // Handle external messages from Discord - trigger inference
+    if (event.type === 'external-message' && event.source === 'discord') {
+      // The message was already added to conversation in handleDiscordMessage()
+      // Here we just signal that inference should run
+      const targetAgents = event.targetAgents;
+      return {
+        requestInference: targetAgents ?? true,
+      };
+    }
+
     // Handle message edits and deletes that came through the queue
     if (event.type === 'message-edited' && event.source === 'discord') {
       // Already handled by the Discord event handlers
