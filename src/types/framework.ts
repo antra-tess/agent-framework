@@ -2,23 +2,26 @@ import type { JsStore } from 'chronicle';
 import type { Membrane } from 'membrane';
 import type { Module, EventResponse } from './module.js';
 import type { AgentConfig, InferenceRequest } from './agent.js';
-import type { QueueEvent } from './events.js';
+import type { ProcessEvent } from './events.js';
+
+// Re-export trace types
+export type { TraceEvent, TraceEventListener } from './trace.js';
 
 /**
- * A module's response to an event, tagged with the module name.
+ * A module's response to a process event, tagged with the module name.
  */
-export interface ModuleEventResponse {
+export interface ModuleProcessResponse {
   moduleName: string;
   response: EventResponse;
 }
 
 /**
- * Configuration for event logging.
+ * Configuration for process event logging.
  */
-export interface EventLoggingConfig {
-  /** Persist event logs to Chronicle (default: false) */
+export interface ProcessLoggingConfig {
+  /** Persist process logs to Chronicle (default: false) */
   persist?: boolean;
-  /** Broadcast event:handled via WebSocket/emit (default: false) */
+  /** Broadcast process:completed trace events (default: false) */
   broadcast?: boolean;
 }
 
@@ -50,8 +53,8 @@ export interface FrameworkConfig {
   /** Interval for periodic store sync in milliseconds (default: 1000ms, 0 to disable) */
   syncIntervalMs?: number;
 
-  /** Event logging configuration (default: disabled) */
-  eventLogging?: EventLoggingConfig;
+  /** Process logging configuration (default: disabled) */
+  processLogging?: ProcessLoggingConfig;
 }
 
 /**
@@ -90,7 +93,7 @@ export interface ErrorPolicy {
  */
 export type ErrorAction =
   | { retry: true; delayMs: number }
-  | { retry: false; emit?: QueueEvent };
+  | { retry: false; emit?: ProcessEvent };
 
 /**
  * Framework state exposed to policies.
@@ -108,27 +111,6 @@ export interface FrameworkState {
   /** Current queue depth */
   queueDepth: number;
 }
-
-/**
- * Events emitted by the framework for observability.
- */
-export type FrameworkEvent =
-  | { type: 'message:added'; messageId: string; source: string }
-  | { type: 'inference:start'; agentName: string }
-  | { type: 'inference:complete'; agentName: string; durationMs: number }
-  | { type: 'inference:error'; agentName: string; error: Error }
-  | { type: 'tool:start'; moduleName: string; toolName: string; callId: string }
-  | { type: 'tool:complete'; moduleName: string; toolName: string; callId: string; durationMs: number }
-  | { type: 'tool:error'; moduleName: string; toolName: string; callId: string; error: Error }
-  | { type: 'module:start'; moduleName: string }
-  | { type: 'module:stop'; moduleName: string }
-  | { type: 'queue:event'; event: QueueEvent }
-  | { type: 'event:handled'; event: QueueEvent; responses: ModuleEventResponse[] };
-
-/**
- * Listener for framework events.
- */
-export type FrameworkEventListener = (event: FrameworkEvent) => void;
 
 /**
  * Entry in the inference log.
@@ -155,21 +137,21 @@ export interface InferenceLogEntry {
 }
 
 /**
- * Entry in the event log - records a processed event with all module responses.
+ * Entry in the process log - records a processed event with all module responses.
  */
-export interface EventLogEntry {
+export interface ProcessLogEntry {
   timestamp: number;
-  /** The event that was processed */
-  event: QueueEvent;
+  /** The process event that was handled */
+  processEvent: ProcessEvent;
   /** Responses from all modules, or blob ID if large */
-  responses: ModuleEventResponse[] | { blobId: string };
+  responses: ModuleProcessResponse[] | { blobId: string };
 }
 
 /**
- * Query options for event logs.
+ * Query options for process logs.
  */
-export interface EventLogQuery {
-  /** Filter by event type */
+export interface ProcessLogQuery {
+  /** Filter by process event type */
   eventType?: string;
   /** Filter by module name (modules that responded) */
   moduleName?: string;
@@ -182,28 +164,28 @@ export interface EventLogQuery {
 }
 
 /**
- * Result from querying event logs.
+ * Result from querying process logs.
  */
-export interface EventLogQueryResult {
-  entries: EventLogEntryWithId[];
+export interface ProcessLogQueryResult {
+  entries: ProcessLogEntryWithId[];
   total: number;
   hasMore: boolean;
 }
 
 /**
- * Event log entry with Chronicle sequence ID.
+ * Process log entry with Chronicle sequence ID.
  */
-export interface EventLogEntryWithId {
+export interface ProcessLogEntryWithId {
   sequence: number;
-  entry: EventLogEntry;
+  entry: ProcessLogEntry;
   /** Summary for display without resolving blobs */
-  summary?: EventLogSummary;
+  summary?: ProcessLogSummary;
 }
 
 /**
- * Summary view of an event log (without full responses).
+ * Summary view of a process log (without full responses).
  */
-export interface EventLogSummary {
+export interface ProcessLogSummary {
   timestamp: number;
   eventType: string;
   moduleCount: number;

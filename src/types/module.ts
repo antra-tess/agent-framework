@@ -1,6 +1,6 @@
 import type { ContentBlock } from 'membrane';
 import type { MessageId, MessageMetadata } from '@connectome/context-manager';
-import type { QueueEvent, ToolDefinition, ToolCall, ToolResult } from './events.js';
+import type { ProcessEvent, ToolDefinition, ToolCall, ToolResult } from './events.js';
 
 /**
  * A pluggable module that provides capabilities to the framework.
@@ -34,10 +34,10 @@ export interface Module {
   handleToolCall(call: ToolCall): Promise<ToolResult>;
 
   /**
-   * Handle an event from the queue.
+   * Handle a process event from the queue.
    * Return response indicating what actions to take.
    */
-  onEvent(event: QueueEvent): Promise<EventResponse>;
+  onProcess(event: ProcessEvent): Promise<EventResponse>;
 
   /**
    * Handle agent speech (if registered as speech handler).
@@ -66,9 +66,9 @@ export interface ModuleContext {
   setState<T>(state: T): void;
 
   /**
-   * Event queue for pushing events from external listeners.
+   * Process queue for pushing events from external listeners.
    */
-  readonly queue: EventQueue;
+  readonly queue: ProcessQueue;
 
   /**
    * Get another module by name.
@@ -139,13 +139,13 @@ export interface ExternalIdRef {
 }
 
 /**
- * Event queue interface for modules.
+ * Process queue interface for modules.
  */
-export interface EventQueue {
+export interface ProcessQueue {
   /**
-   * Push an event to the queue.
+   * Push a process event to the queue.
    */
-  push(event: QueueEvent): void;
+  push(event: ProcessEvent): void;
 }
 
 /**

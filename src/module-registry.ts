@@ -4,7 +4,7 @@ import type { MessageId, MessageMetadata } from '@connectome/context-manager';
 import type {
   Module,
   ModuleContext,
-  EventQueue,
+  ProcessQueue,
   ToolDefinition,
   ToolCall,
   ToolResult,
@@ -35,7 +35,7 @@ export class ModuleRegistry {
   private moduleContexts: Map<string, ModuleContextImpl> = new Map();
   private speechHandlers: SpeechHandler[] = [];
   private store: JsStore;
-  private queue: EventQueue;
+  private queue: ProcessQueue;
   private getAgents: () => Agent[];
   private addMessageFn: (participant: string, content: ContentBlock[], metadata?: MessageMetadata) => MessageId;
   private editMessageFn: (id: MessageId, content: ContentBlock[]) => void;
@@ -43,7 +43,7 @@ export class ModuleRegistry {
 
   constructor(
     store: JsStore,
-    queue: EventQueue,
+    queue: ProcessQueue,
     options: {
       getAgents: () => Agent[];
       addMessage: (participant: string, content: ContentBlock[], metadata?: MessageMetadata) => MessageId;
@@ -275,7 +275,7 @@ class ModuleContextImpl implements ModuleContext {
   private moduleName: string;
   private store: JsStore;
   private stateId: string;
-  readonly queue: EventQueue;
+  readonly queue: ProcessQueue;
   private registry: ModuleRegistry;
   readonly isRestart: boolean;
   private getAgentsFn: () => Agent[];
@@ -290,7 +290,7 @@ class ModuleContextImpl implements ModuleContext {
     moduleName: string,
     store: JsStore,
     stateId: string,
-    queue: EventQueue,
+    queue: ProcessQueue,
     registry: ModuleRegistry,
     isRestart: boolean,
     getAgents: () => Agent[],

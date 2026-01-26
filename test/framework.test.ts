@@ -11,13 +11,13 @@ import type { NormalizedRequest, NormalizedResponse, ContentBlock } from 'membra
 import type {
   Module,
   ModuleContext,
-  QueueEvent,
+  ProcessEvent,
   EventResponse,
   ToolDefinition,
   ToolCall,
   ToolResult,
 } from '../src/index.js';
-import { AgentFramework, EventQueueImpl } from '../src/index.js';
+import { AgentFramework, ProcessQueueImpl } from '../src/index.js';
 
 // ============================================================================
 // Mock Membrane - minimal interface that framework needs
@@ -85,7 +85,7 @@ class MockMembrane implements MinimalMembrane {
 class TestModule implements Module {
   readonly name = 'test';
   ctx: ModuleContext | null = null;
-  events: QueueEvent[] = [];
+  events: ProcessEvent[] = [];
   toolCalls: ToolCall[] = [];
 
   async start(ctx: ModuleContext): Promise<void> {
@@ -121,7 +121,7 @@ class TestModule implements Module {
     return { success: false, error: 'Unknown tool', isError: true };
   }
 
-  async onEvent(event: QueueEvent): Promise<EventResponse> {
+  async onProcess(event: ProcessEvent): Promise<EventResponse> {
     this.events.push(event);
 
     // Handle external message by requesting inference
@@ -145,10 +145,10 @@ class TestModule implements Module {
 // Tests
 // ============================================================================
 
-describe('EventQueueImpl', () => {
+describe('ProcessQueueImpl', () => {
   it('should push and pop events', () => {
-    const queue = new EventQueueImpl();
-    const event: QueueEvent = {
+    const queue = new ProcessQueueImpl();
+    const event: ProcessEvent = {
       type: 'timer-fired',
       timerId: 'test',
       reason: 'test',
@@ -165,13 +165,13 @@ describe('EventQueueImpl', () => {
   });
 
   it('should return null when queue is empty', () => {
-    const queue = new EventQueueImpl();
+    const queue = new ProcessQueueImpl();
     assert.strictEqual(queue.tryPop(), null);
   });
 
   it('should peek without removing', () => {
-    const queue = new EventQueueImpl();
-    const event: QueueEvent = {
+    const queue = new ProcessQueueImpl();
+    const event: ProcessEvent = {
       type: 'timer-fired',
       timerId: 'test',
       reason: 'test',
@@ -183,7 +183,7 @@ describe('EventQueueImpl', () => {
   });
 
   it('should clear all events', () => {
-    const queue = new EventQueueImpl();
+    const queue = new ProcessQueueImpl();
     queue.push({ type: 'timer-fired', timerId: '1', reason: 'test' });
     queue.push({ type: 'timer-fired', timerId: '2', reason: 'test' });
 
@@ -192,7 +192,7 @@ describe('EventQueueImpl', () => {
   });
 
   it('should close and prevent further pushes', () => {
-    const queue = new EventQueueImpl();
+    const queue = new ProcessQueueImpl();
     queue.close();
 
     assert.throws(() => {
@@ -349,7 +349,7 @@ describe('AgentFramework', () => {
       modules: [testModule],
     });
 
-    framework.on((event) => {
+    framework.onTrace((event) => {
       events.push(event.type);
     });
 
@@ -494,7 +494,7 @@ describe('Module state persistence', () => {
       async handleToolCall(): Promise<ToolResult> {
         return { success: false, error: 'No tools', isError: true };
       }
-      async onEvent(): Promise<EventResponse> { return {}; }
+      async onProcess(): Promise<EventResponse> { return {}; }
     }
 
     const storePath = join(tempDir, 'state.chronicle');
@@ -538,7 +538,7 @@ describe('Module state persistence', () => {
       async handleToolCall(): Promise<ToolResult> {
         return { success: false, error: 'No tools', isError: true };
       }
-      async onEvent(): Promise<EventResponse> { return {}; }
+      async onProcess(): Promise<EventResponse> { return {}; }
     }
 
     const module = new IdTrackingModule();

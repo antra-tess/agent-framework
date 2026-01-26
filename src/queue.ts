@@ -1,18 +1,18 @@
-import type { QueueEvent, EventQueue as IEventQueue } from './types/index.js';
+import type { ProcessEvent, ProcessQueue } from './types/index.js';
 
 /**
- * Event queue for the framework.
- * Events from external sources and internal operations flow through here.
+ * Process queue for the framework.
+ * ProcessEvents from external sources and internal operations flow through here.
  */
-export class EventQueueImpl implements IEventQueue {
-  private queue: QueueEvent[] = [];
-  private waiters: Array<(event: QueueEvent) => void> = [];
+export class ProcessQueueImpl implements ProcessQueue {
+  private queue: ProcessEvent[] = [];
+  private waiters: Array<(event: ProcessEvent) => void> = [];
   private closed = false;
 
   /**
-   * Push an event to the queue.
+   * Push a process event to the queue.
    */
-  push(event: QueueEvent): void {
+  push(event: ProcessEvent): void {
     if (this.closed) {
       throw new Error('Queue is closed');
     }
@@ -27,10 +27,10 @@ export class EventQueueImpl implements IEventQueue {
   }
 
   /**
-   * Pop the next event from the queue.
+   * Pop the next process event from the queue.
    * Returns immediately if an event is available, otherwise waits.
    */
-  async pop(): Promise<QueueEvent> {
+  async pop(): Promise<ProcessEvent> {
     if (this.closed) {
       throw new Error('Queue is closed');
     }
@@ -48,17 +48,17 @@ export class EventQueueImpl implements IEventQueue {
   }
 
   /**
-   * Try to pop an event without waiting.
+   * Try to pop a process event without waiting.
    * Returns null if queue is empty.
    */
-  tryPop(): QueueEvent | null {
+  tryPop(): ProcessEvent | null {
     return this.queue.shift() ?? null;
   }
 
   /**
-   * Peek at the next event without removing it.
+   * Peek at the next process event without removing it.
    */
-  peek(): QueueEvent | null {
+  peek(): ProcessEvent | null {
     return this.queue[0] ?? null;
   }
 

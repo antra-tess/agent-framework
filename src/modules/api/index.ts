@@ -8,7 +8,7 @@
 import type {
   Module,
   ModuleContext,
-  QueueEvent,
+  ProcessEvent,
   EventResponse,
   ToolCall,
   ToolResult,
@@ -42,7 +42,7 @@ export class ApiModule implements Module {
     return { success: false, error: 'Unknown tool' };
   }
 
-  async onEvent(event: QueueEvent): Promise<EventResponse> {
+  async onProcess(event: ProcessEvent): Promise<EventResponse> {
     if (!event.type.startsWith('api:')) {
       return {};
     }

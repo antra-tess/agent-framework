@@ -11,7 +11,7 @@ import type { ContentBlock } from 'membrane';
 import type {
   Module,
   ModuleContext,
-  QueueEvent,
+  ProcessEvent,
   EventResponse,
   ToolDefinition,
   ToolCall,
@@ -277,7 +277,7 @@ export class DiscordModule implements Module {
     }
   }
 
-  async onEvent(event: QueueEvent): Promise<EventResponse> {
+  async onProcess(event: ProcessEvent): Promise<EventResponse> {
     // Handle external messages from Discord - trigger inference
     if (event.type === 'external-message' && event.source === 'discord') {
       // The message was already added to conversation in handleDiscordMessage()

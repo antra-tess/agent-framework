@@ -348,25 +348,24 @@ export interface StateInfo {
 // ============================================================================
 
 export type ApiEventType =
-  // Framework events
-  | 'inference:start'
-  | 'inference:complete'
-  | 'inference:error'
-  | 'tool:start'
-  | 'tool:complete'
-  | 'tool:error'
-  | 'event:handled'
-  | 'speech'
+  // Trace events (from framework)
+  | 'process:completed'
+  | 'inference:started'
+  | 'inference:completed'
+  | 'inference:failed'
+  | 'tool:started'
+  | 'tool:completed'
+  | 'tool:failed'
+  | 'module:added'
+  | 'module:removed'
   | 'message:added'
-  | 'message:edited'
-  | 'message:removed'
+  // Server-specific events
+  | 'connected'
+  | 'speech'
   // Branch events
   | 'branch:switched'
   | 'branch:created'
   | 'branch:deleted'
-  // Module events
-  | 'module:started'
-  | 'module:stopped'
   // Store subscription events
   | 'store:record'
   | 'store:state_snapshot'
