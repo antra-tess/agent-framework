@@ -20,7 +20,8 @@ export type {
   SyncInput,
 } from './files/index.js';
 
-export { DiscordModule } from './discord/index.js';
+export { DiscordModule, DiscordJsClient } from './discord/index.js';
+export type { DiscordJsClientConfig } from './discord/index.js';
 export type {
   DiscordModuleConfig,
   DiscordModuleState,

@@ -76,6 +76,11 @@ export class DiscordJsClient implements DiscordClientInterface {
   }
 
   private shouldHandleMessage(message: Message): boolean {
+    // Never process our own messages (prevents feedback loop)
+    if (message.author.id === this.client.user?.id) {
+      return false;
+    }
+
     // Filter by guild
     if (this.guildIds && this.guildIds.length > 0) {
       if (!message.guildId || !this.guildIds.includes(message.guildId)) {

@@ -46,7 +46,7 @@ export const useEventsStore = defineStore('events', () => {
       if (!result[event.type]) {
         result[event.type] = [];
       }
-      result[event.type].push(event);
+      result[event.type]!.push(event);
     }
     return result;
   });

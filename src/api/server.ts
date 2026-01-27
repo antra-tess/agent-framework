@@ -10,7 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import type { ContentBlock } from 'membrane';
 import type { AgentFramework } from '../framework.js';
-import type { FrameworkEvent, InferenceRequest, QueueEvent } from '../types/index.js';
+import type { TraceEvent, ProcessEvent } from '../types/index.js';
 import type {
   ApiServerConfig,
   ApiRequest,
@@ -32,6 +32,11 @@ import type {
   InferenceTailParams,
   InferenceInspectParams,
   InferenceSearchParams,
+  EventsTailParams,
+  EventsInspectParams,
+  EventsSearchParams,
+  EventsSubscribeParams,
+  PersistedEvent,
   AgentInfo,
   ModuleInfo,
   BranchInfo,
@@ -95,9 +100,9 @@ export class ApiServer {
       this.handleConnection(ws);
     });
 
-    // Subscribe to framework events
-    this.framework.on((event) => {
-      this.handleFrameworkEvent(event);
+    // Subscribe to trace events
+    this.framework.onTrace((event) => {
+      this.handleTraceEvent(event);
     });
 
     // Start listening
@@ -257,74 +262,18 @@ export class ApiServer {
   }
 
   // ==========================================================================
-  // Framework Event Handling
+  // Trace Event Handling
   // ==========================================================================
 
-  private handleFrameworkEvent(event: FrameworkEvent): void {
-    switch (event.type) {
-      case 'inference:start':
-        this.broadcast('inference:start', { agentName: event.agentName });
-        break;
-
-      case 'inference:complete':
-        this.broadcast('inference:complete', {
-          agentName: event.agentName,
-          durationMs: event.durationMs,
-        });
-        break;
-
-      case 'inference:error':
-        this.broadcast('inference:error', {
-          agentName: event.agentName,
-          error: event.error.message,
-        });
-        break;
-
-      case 'tool:start':
-        this.broadcast('tool:start', {
-          moduleName: event.moduleName,
-          toolName: event.toolName,
-          callId: event.callId,
-        });
-        break;
-
-      case 'tool:complete':
-        this.broadcast('tool:complete', {
-          moduleName: event.moduleName,
-          toolName: event.toolName,
-          callId: event.callId,
-          durationMs: event.durationMs,
-        });
-        break;
-
-      case 'tool:error':
-        this.broadcast('tool:error', {
-          moduleName: event.moduleName,
-          toolName: event.toolName,
-          callId: event.callId,
-          error: event.error.message,
-        });
-        break;
-
-      case 'message:added':
-        this.broadcast('message:added', {
-          messageId: event.messageId,
-          source: event.source,
-        });
-        break;
-
-      case 'queue:event':
-        // Don't broadcast raw queue events
-        break;
-
-      case 'module:start':
-        this.broadcast('module:started', { moduleName: event.moduleName });
-        break;
-
-      case 'module:stop':
-        this.broadcast('module:stopped', { moduleName: event.moduleName });
-        break;
+  private handleTraceEvent(event: TraceEvent): void {
+    // Skip process:received — clients don't need raw input events
+    if (event.type === 'process:received') {
+      return;
     }
+
+    // Broadcast all other trace events directly — no translation needed
+    // TraceEvents are already serializable (error is string, not Error)
+    this.broadcast(event.type, event);
   }
 
   // ==========================================================================
@@ -387,6 +336,16 @@ export class ApiServer {
       case 'inference.search':
         return this.cmdInferenceSearch(params as unknown as InferenceSearchParams);
 
+      // Event logs
+      case 'events.tail':
+        return this.cmdEventsTail(params as unknown as EventsTailParams);
+      case 'events.inspect':
+        return this.cmdEventsInspect(params as unknown as EventsInspectParams);
+      case 'events.search':
+        return this.cmdEventsSearch(params as unknown as EventsSearchParams);
+      case 'events.subscribe':
+        return this.cmdEventsSubscribe(params as unknown as EventsSubscribeParams);
+
       default:
         throw new Error(`Unknown command: ${command}`);
     }
@@ -408,7 +367,7 @@ export class ApiServer {
       content: params.content,
       triggerInference: params.triggerInference ?? true,
       targetAgents: params.targetAgents,
-    } as QueueEvent);
+    } as ProcessEvent);
 
     return { messageId: 'pending' }; // TODO: return actual ID
   }
@@ -437,7 +396,7 @@ export class ApiServer {
       type: 'api:inference-request',
       agentName: params?.agentName,
       reason: params?.reason,
-    } as QueueEvent);
+    } as ProcessEvent);
 
     return { queued: true };
   }
@@ -561,19 +520,15 @@ export class ApiServer {
   }
 
   private async cmdModuleList(): Promise<{ modules: ModuleInfo[] }> {
-    // Get modules through the framework
-    // Note: We need to expose getAllModules from framework
-    const store = this.framework.getStore();
-
-    // For now, list module states from store
-    const states = store.listStates();
-    const moduleStates = states.filter((s) => s.id.startsWith('modules/'));
-    const moduleNames = [...new Set(moduleStates.map((s) => s.id.split('/')[1]))];
+    const modules = this.framework.getAllModules();
+    const allTools = this.framework.getAllTools();
 
     return {
-      modules: moduleNames.map((name) => ({
-        name,
-        tools: [], // Would need framework access
+      modules: modules.map((module) => ({
+        name: module.name,
+        tools: allTools
+          .filter((t) => t.name.startsWith(`${module.name}:`))
+          .map((t) => t.name),
       })),
     };
   }
@@ -702,6 +657,91 @@ export class ApiServer {
     });
 
     return result;
+  }
+
+  // ==========================================================================
+  // Event Log Commands
+  // ==========================================================================
+
+  private async cmdEventsTail(params?: EventsTailParams): Promise<{ entries: unknown[] }> {
+    const entries = this.framework.tailProcessLogs(
+      params?.count ?? 10,
+      params?.eventType
+    );
+
+    return { entries };
+  }
+
+  private async cmdEventsInspect(params: EventsInspectParams): Promise<{ entry: unknown }> {
+    if (params.sequence === undefined || params.sequence === null) {
+      throw new Error('sequence is required');
+    }
+
+    const entry = this.framework.getProcessLog(params.sequence);
+    if (!entry) {
+      throw new Error(`Process log not found: ${params.sequence}`);
+    }
+
+    return { entry };
+  }
+
+  private async cmdEventsSearch(params?: EventsSearchParams): Promise<unknown> {
+    const result = this.framework.queryProcessLogs({
+      eventType: params?.eventType,
+      moduleName: params?.moduleName,
+      limit: params?.limit,
+      offset: params?.offset,
+      pattern: params?.pattern,
+    });
+
+    return result;
+  }
+
+  private async cmdEventsSubscribe(
+    params?: EventsSubscribeParams
+  ): Promise<{ subscribed: string[]; history: PersistedEvent[] }> {
+    const types = params?.types ?? ['*'];
+    const limit = params?.limit ?? 100;
+
+    // Get historical events from the process log
+    const processEntries = this.framework.tailProcessLogs(limit);
+
+    // Convert ProcessLogEntry to PersistedEvent format
+    const history: PersistedEvent[] = processEntries.map((item) => {
+      const { sequence, entry } = item;
+      const event = entry.processEvent;
+      const timestamp = entry.timestamp;
+
+      // Extract agent/module info from event if available
+      const agentName =
+        (event as Record<string, unknown>).agentName as string | undefined;
+      const moduleName =
+        (event as Record<string, unknown>).moduleName as string | undefined;
+
+      return {
+        id: `evt-${sequence}`,
+        sequence,
+        timestamp,
+        type: event?.type ?? 'unknown',
+        payload: event,
+        source: 'chronicle',
+        agentName,
+        moduleName,
+      };
+    });
+
+    // Filter by types if not wildcard
+    const filteredHistory =
+      types.includes('*')
+        ? history
+        : history.filter((evt) =>
+            types.some((pattern) => matchEventType(pattern, evt.type))
+          );
+
+    return {
+      subscribed: types,
+      history: filteredHistory,
+    };
   }
 
   // ==========================================================================
@@ -891,4 +931,17 @@ export class ApiServer {
       }
     }
   }
+}
+
+/**
+ * Check if an event type matches a pattern.
+ * Supports wildcards like 'inference:*' or exact matches.
+ */
+function matchEventType(pattern: string, eventType: string): boolean {
+  if (pattern === '*') return true;
+  if (pattern.endsWith(':*')) {
+    const prefix = pattern.slice(0, -1);
+    return eventType.startsWith(prefix);
+  }
+  return pattern === eventType;
 }

@@ -3,15 +3,18 @@ import { onMounted, watch } from 'vue';
 import { useWebSocket } from './composables/useWebSocket';
 import { useEventsStore } from './stores/events';
 import { useAgentsStore } from './stores/agents';
+import { useEventLogsStore } from './stores/eventLogs';
 import EventTimeline from './components/EventTimeline.vue';
 import FilterPanel from './components/FilterPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
-import type { PersistedEvent, AgentInfo, BranchInfo } from './api/types';
+import EventLogPanel from './components/EventLogPanel.vue';
+import type { PersistedEvent, AgentInfo, BranchInfo, EventLogEntryWithId, ModuleEventResponse } from './api/types';
 
 const eventsStore = useEventsStore();
 const agentsStore = useAgentsStore();
+const eventLogsStore = useEventLogsStore();
 
-const { connected, error, send, on, off } = useWebSocket({
+const { connected, send, on } = useWebSocket({
   url: 'ws://localhost:8765/ws',
 });
 
@@ -25,6 +28,7 @@ watch(connected, (isConnected) => {
 
 async function loadInitialData() {
   eventsStore.setLoading(true);
+  eventLogsStore.setLoading(true);
   try {
     // Load agents
     const agentResult = await send<{ agents: AgentInfo[] }>('agent.list');
@@ -46,10 +50,22 @@ async function loadInitialData() {
     );
     eventsStore.setSubscriptions(subResult.subscribed);
     eventsStore.setEvents(subResult.history);
+
+    // Load historical event logs
+    try {
+      const eventLogsResult = await send<{ entries: EventLogEntryWithId[] }>(
+        'events.tail',
+        { count: 100 }
+      );
+      eventLogsStore.setHistoricalLogs(eventLogsResult.entries);
+    } catch (e) {
+      console.error('Failed to load event logs:', e);
+    }
   } catch (e) {
     eventsStore.setError(e instanceof Error ? e.message : String(e));
   } finally {
     eventsStore.setLoading(false);
+    eventLogsStore.setLoading(false);
   }
 }
 
@@ -66,12 +82,28 @@ function handleEvent(data: { event: string; data: unknown }) {
   eventsStore.addEvent(persistedEvent);
 
   // Update agent status if relevant
-  if (data.event === 'inference:start') {
+  if (data.event === 'inference:started') {
     const { agentName } = data.data as { agentName: string };
     agentsStore.updateAgentStatus(agentName, 'inferring');
-  } else if (data.event === 'inference:complete' || data.event === 'inference:error') {
+  } else if (data.event === 'inference:completed' || data.event === 'inference:failed') {
     const { agentName } = data.data as { agentName: string };
     agentsStore.updateAgentStatus(agentName, 'idle');
+  }
+
+  // Handle process:completed for process log panel
+  if (data.event === 'process:completed') {
+    const eventData = data.data as {
+      timestamp: number;
+      processEvent: { type: string; [key: string]: unknown };
+      responses: ModuleEventResponse[];
+      durationMs: number;
+    };
+    // Convert to the format the store expects
+    eventLogsStore.addLogFromEvent({
+      timestamp: eventData.timestamp,
+      event: eventData.processEvent,
+      responses: eventData.responses,
+    });
   }
 }
 
@@ -89,7 +121,7 @@ async function sendMessage(content: string) {
 
 // Subscribe to events
 onMounted(() => {
-  on('*', handleEvent);
+  on('*', handleEvent as (data: unknown) => void);
 });
 
 // Update subscriptions when filters change
@@ -124,8 +156,9 @@ watch(
         <FilterPanel />
       </aside>
 
-      <section class="content">
+      <section class="content content-split">
         <EventTimeline />
+        <EventLogPanel />
       </section>
     </main>
   </div>
@@ -193,6 +226,16 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+}
+
+.content-split {
+  flex-direction: row;
+  gap: 16px;
+}
+
+.content-split > * {
+  flex: 1;
   min-width: 0;
 }
 </style>

@@ -12,12 +12,14 @@ export type ToolCallId = string;
 export type ToolDefinition = MembraneToolDefinition;
 
 /**
- * Events that flow through the framework's event queue.
+ * Events that flow through the framework's processing queue.
+ *
+ * ProcessEvents represent work to be done — modules respond to them via onProcess().
+ * They are distinct from TraceEvents, which are observability-only notifications.
  *
  * Modules can define their own namespaced events (e.g., 'api:message', 'discord:reaction').
- * The framework dispatches all events to modules via onEvent().
  */
-export type QueueEvent =
+export type ProcessEvent =
   | ExternalMessageEvent
   | ToolResultEvent
   | TimerFiredEvent

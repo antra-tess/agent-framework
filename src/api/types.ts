@@ -83,7 +83,12 @@ export type ApiCommand =
   // Inference logs
   | 'inference.tail'
   | 'inference.inspect'
-  | 'inference.search';
+  | 'inference.search'
+  // Event logs
+  | 'events.tail'
+  | 'events.inspect'
+  | 'events.search'
+  | 'events.subscribe';
 
 // ============================================================================
 // Command Parameters
@@ -193,6 +198,61 @@ export interface InferenceSearchParams {
   errorsOnly?: boolean;
 }
 
+// --- Event Log Parameters ---
+
+export interface EventsTailParams {
+  /** Number of recent entries to return (default: 10) */
+  count?: number;
+  /** Filter by event type */
+  eventType?: string;
+}
+
+export interface EventsInspectParams {
+  /** Sequence number of the log entry to inspect */
+  sequence: number;
+}
+
+export interface EventsSearchParams {
+  /** Filter by event type */
+  eventType?: string;
+  /** Filter by module name */
+  moduleName?: string;
+  /** Maximum number of results (default: 20) */
+  limit?: number;
+  /** Skip first N results for pagination (default: 0) */
+  offset?: number;
+  /** Regex pattern to match against log content */
+  pattern?: string;
+}
+
+export interface EventsSubscribeParams {
+  /** Event type patterns to subscribe to (e.g., 'inference:*', 'tool:*') */
+  types?: string[];
+  /** Maximum number of historical events to return (default: 100) */
+  limit?: number;
+}
+
+export interface PersistedEvent {
+  /** Unique event ID */
+  id: string;
+  /** Sequence number in the event log */
+  sequence?: number;
+  /** Event timestamp */
+  timestamp: number;
+  /** Event type */
+  type: string;
+  /** Event payload */
+  payload: unknown;
+  /** Source of the event */
+  source: string;
+  /** ID of event that caused this one */
+  causedBy?: string;
+  /** Agent name (if applicable) */
+  agentName?: string;
+  /** Module name (if applicable) */
+  moduleName?: string;
+}
+
 // --- Subscription Parameters ---
 
 export interface StoreSubscribeParams {
@@ -288,24 +348,24 @@ export interface StateInfo {
 // ============================================================================
 
 export type ApiEventType =
-  // Framework events
-  | 'inference:start'
-  | 'inference:complete'
-  | 'inference:error'
-  | 'tool:start'
-  | 'tool:complete'
-  | 'tool:error'
-  | 'speech'
+  // Trace events (from framework)
+  | 'process:completed'
+  | 'inference:started'
+  | 'inference:completed'
+  | 'inference:failed'
+  | 'tool:started'
+  | 'tool:completed'
+  | 'tool:failed'
+  | 'module:added'
+  | 'module:removed'
   | 'message:added'
-  | 'message:edited'
-  | 'message:removed'
+  // Server-specific events
+  | 'connected'
+  | 'speech'
   // Branch events
   | 'branch:switched'
   | 'branch:created'
   | 'branch:deleted'
-  // Module events
-  | 'module:started'
-  | 'module:stopped'
   // Store subscription events
   | 'store:record'
   | 'store:state_snapshot'

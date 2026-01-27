@@ -4,7 +4,7 @@ export * from './types/index.js';
 // Core classes
 export { AgentFramework } from './framework.js';
 export { Agent } from './agent.js';
-export { EventQueueImpl } from './queue.js';
+export { ProcessQueueImpl } from './queue.js';
 export { ModuleRegistry } from './module-registry.js';
 
 // Built-in modules

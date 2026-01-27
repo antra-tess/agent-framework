@@ -1,6 +1,6 @@
 import type { ContentBlock } from 'membrane';
 import type { MessageId, MessageMetadata } from '@connectome/context-manager';
-import type { QueueEvent, ToolDefinition, ToolCall, ToolResult } from './events.js';
+import type { ProcessEvent, ToolDefinition, ToolCall, ToolResult } from './events.js';
 
 /**
  * A pluggable module that provides capabilities to the framework.
@@ -34,10 +34,13 @@ export interface Module {
   handleToolCall(call: ToolCall): Promise<ToolResult>;
 
   /**
-   * Handle an event from the queue.
+   * Handle a process event from the queue.
    * Return response indicating what actions to take.
+   *
+   * @param event - The event to process
+   * @param state - Read-only state snapshot for accessing module state and lookups
    */
-  onEvent(event: QueueEvent): Promise<EventResponse>;
+  onProcess(event: ProcessEvent, state: ProcessState): Promise<EventResponse>;
 
   /**
    * Handle agent speech (if registered as speech handler).
@@ -66,9 +69,9 @@ export interface ModuleContext {
   setState<T>(state: T): void;
 
   /**
-   * Event queue for pushing events from external listeners.
+   * Process queue for pushing events from external listeners.
    */
-  readonly queue: EventQueue;
+  readonly queue: ProcessQueue;
 
   /**
    * Get another module by name.
@@ -131,6 +134,42 @@ export interface ModuleContext {
 }
 
 /**
+ * Read-only state snapshot provided to modules during event processing.
+ * State writes happen via EventResponse, not through this interface.
+ */
+export interface ProcessState {
+  /**
+   * Get this module's state.
+   */
+  getState<T>(): T | null;
+
+  /**
+   * Get another module's state by name.
+   */
+  getModuleState<T>(name: string): T | null;
+
+  /**
+   * Find a message by external ID.
+   */
+  findMessageByExternalId(source: string, externalId: string): MessageId | null;
+
+  /**
+   * Get info about all agents.
+   */
+  getAgents(): AgentInfo[];
+
+  /**
+   * Get all currently available tools.
+   */
+  getActiveTools(): ToolDefinition[];
+
+  /**
+   * Queue for emitting follow-up events.
+   */
+  readonly queue: ProcessQueue;
+}
+
+/**
  * Reference to an external system's ID.
  */
 export interface ExternalIdRef {
@@ -139,13 +178,13 @@ export interface ExternalIdRef {
 }
 
 /**
- * Event queue interface for modules.
+ * Process queue interface for modules.
  */
-export interface EventQueue {
+export interface ProcessQueue {
   /**
-   * Push an event to the queue.
+   * Push a process event to the queue.
    */
-  push(event: QueueEvent): void;
+  push(event: ProcessEvent): void;
 }
 
 /**
@@ -193,6 +232,13 @@ export interface EventResponse {
    * Signal that this module's tools have changed.
    */
   toolsChanged?: boolean;
+
+  /**
+   * Module state update. Applied atomically with message operations.
+   * The framework will call setState() with this value after applying
+   * message changes, ensuring consistent state.
+   */
+  stateUpdate?: unknown;
 }
 
 /**

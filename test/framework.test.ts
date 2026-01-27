@@ -11,13 +11,14 @@ import type { NormalizedRequest, NormalizedResponse, ContentBlock } from 'membra
 import type {
   Module,
   ModuleContext,
-  QueueEvent,
+  ProcessState,
+  ProcessEvent,
   EventResponse,
   ToolDefinition,
   ToolCall,
   ToolResult,
 } from '../src/index.js';
-import { AgentFramework, EventQueueImpl } from '../src/index.js';
+import { AgentFramework, ProcessQueueImpl } from '../src/index.js';
 
 // ============================================================================
 // Mock Membrane - minimal interface that framework needs
@@ -31,9 +32,17 @@ function createMockResponse(
   content: ContentBlock[],
   stopReason: NormalizedResponse['stopReason'] = 'end_turn'
 ): NormalizedResponse {
+  const rawText = content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
+    .join('');
+
   return {
     content,
     stopReason,
+    rawAssistantText: rawText,
+    toolCalls: [],
+    toolResults: [],
     usage: { inputTokens: 10, outputTokens: 5 },
     details: {
       stop: { reason: stopReason, wasTruncated: false },
@@ -77,7 +86,7 @@ class MockMembrane implements MinimalMembrane {
 class TestModule implements Module {
   readonly name = 'test';
   ctx: ModuleContext | null = null;
-  events: QueueEvent[] = [];
+  events: ProcessEvent[] = [];
   toolCalls: ToolCall[] = [];
 
   async start(ctx: ModuleContext): Promise<void> {
@@ -113,7 +122,7 @@ class TestModule implements Module {
     return { success: false, error: 'Unknown tool', isError: true };
   }
 
-  async onEvent(event: QueueEvent): Promise<EventResponse> {
+  async onProcess(event: ProcessEvent, _state: ProcessState): Promise<EventResponse> {
     this.events.push(event);
 
     // Handle external message by requesting inference
@@ -137,10 +146,10 @@ class TestModule implements Module {
 // Tests
 // ============================================================================
 
-describe('EventQueueImpl', () => {
+describe('ProcessQueueImpl', () => {
   it('should push and pop events', () => {
-    const queue = new EventQueueImpl();
-    const event: QueueEvent = {
+    const queue = new ProcessQueueImpl();
+    const event: ProcessEvent = {
       type: 'timer-fired',
       timerId: 'test',
       reason: 'test',
@@ -157,13 +166,13 @@ describe('EventQueueImpl', () => {
   });
 
   it('should return null when queue is empty', () => {
-    const queue = new EventQueueImpl();
+    const queue = new ProcessQueueImpl();
     assert.strictEqual(queue.tryPop(), null);
   });
 
   it('should peek without removing', () => {
-    const queue = new EventQueueImpl();
-    const event: QueueEvent = {
+    const queue = new ProcessQueueImpl();
+    const event: ProcessEvent = {
       type: 'timer-fired',
       timerId: 'test',
       reason: 'test',
@@ -175,7 +184,7 @@ describe('EventQueueImpl', () => {
   });
 
   it('should clear all events', () => {
-    const queue = new EventQueueImpl();
+    const queue = new ProcessQueueImpl();
     queue.push({ type: 'timer-fired', timerId: '1', reason: 'test' });
     queue.push({ type: 'timer-fired', timerId: '2', reason: 'test' });
 
@@ -184,7 +193,7 @@ describe('EventQueueImpl', () => {
   });
 
   it('should close and prevent further pushes', () => {
-    const queue = new EventQueueImpl();
+    const queue = new ProcessQueueImpl();
     queue.close();
 
     assert.throws(() => {
@@ -341,7 +350,7 @@ describe('AgentFramework', () => {
       modules: [testModule],
     });
 
-    framework.on((event) => {
+    framework.onTrace((event) => {
       events.push(event.type);
     });
 
@@ -354,10 +363,10 @@ describe('AgentFramework', () => {
 
     await framework.runUntilIdle();
 
-    assert.ok(events.includes('queue:event'));
-    assert.ok(events.includes('inference:start'));
-    assert.ok(events.includes('inference:complete'));
-    assert.ok(events.includes('message:added'));
+    assert.ok(events.includes('process:received'), 'Should emit process:received');
+    assert.ok(events.includes('inference:started'), 'Should emit inference:started');
+    assert.ok(events.includes('inference:completed'), 'Should emit inference:completed');
+    assert.ok(events.includes('message:added'), 'Should emit message:added');
 
     await framework.stop();
     rmSync(tempDir, { recursive: true });
@@ -486,7 +495,7 @@ describe('Module state persistence', () => {
       async handleToolCall(): Promise<ToolResult> {
         return { success: false, error: 'No tools', isError: true };
       }
-      async onEvent(): Promise<EventResponse> { return {}; }
+      async onProcess(): Promise<EventResponse> { return {}; }
     }
 
     const storePath = join(tempDir, 'state.chronicle');
@@ -530,7 +539,7 @@ describe('Module state persistence', () => {
       async handleToolCall(): Promise<ToolResult> {
         return { success: false, error: 'No tools', isError: true };
       }
-      async onEvent(): Promise<EventResponse> { return {}; }
+      async onProcess(): Promise<EventResponse> { return {}; }
     }
 
     const module = new IdTrackingModule();

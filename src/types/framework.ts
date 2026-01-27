@@ -1,8 +1,29 @@
 import type { JsStore } from 'chronicle';
 import type { Membrane } from 'membrane';
-import type { Module } from './module.js';
+import type { Module, EventResponse } from './module.js';
 import type { AgentConfig, InferenceRequest } from './agent.js';
-import type { QueueEvent } from './events.js';
+import type { ProcessEvent } from './events.js';
+
+// Re-export trace types
+export type { TraceEvent, TraceEventListener } from './trace.js';
+
+/**
+ * A module's response to a process event, tagged with the module name.
+ */
+export interface ModuleProcessResponse {
+  moduleName: string;
+  response: EventResponse;
+}
+
+/**
+ * Configuration for process event logging.
+ */
+export interface ProcessLoggingConfig {
+  /** Persist process logs to Chronicle (default: false) */
+  persist?: boolean;
+  /** Broadcast process:completed trace events (default: false) */
+  broadcast?: boolean;
+}
 
 /**
  * Configuration for the agent framework.
@@ -31,6 +52,9 @@ export interface FrameworkConfig {
 
   /** Interval for periodic store sync in milliseconds (default: 1000ms, 0 to disable) */
   syncIntervalMs?: number;
+
+  /** Process logging configuration (default: disabled) */
+  processLogging?: ProcessLoggingConfig;
 }
 
 /**
@@ -69,7 +93,7 @@ export interface ErrorPolicy {
  */
 export type ErrorAction =
   | { retry: true; delayMs: number }
-  | { retry: false; emit?: QueueEvent };
+  | { retry: false; emit?: ProcessEvent };
 
 /**
  * Framework state exposed to policies.
@@ -87,26 +111,6 @@ export interface FrameworkState {
   /** Current queue depth */
   queueDepth: number;
 }
-
-/**
- * Events emitted by the framework for observability.
- */
-export type FrameworkEvent =
-  | { type: 'message:added'; messageId: string; source: string }
-  | { type: 'inference:start'; agentName: string }
-  | { type: 'inference:complete'; agentName: string; durationMs: number }
-  | { type: 'inference:error'; agentName: string; error: Error }
-  | { type: 'tool:start'; moduleName: string; toolName: string; callId: string }
-  | { type: 'tool:complete'; moduleName: string; toolName: string; callId: string; durationMs: number }
-  | { type: 'tool:error'; moduleName: string; toolName: string; callId: string; error: Error }
-  | { type: 'module:start'; moduleName: string }
-  | { type: 'module:stop'; moduleName: string }
-  | { type: 'queue:event'; event: QueueEvent };
-
-/**
- * Listener for framework events.
- */
-export type FrameworkEventListener = (event: FrameworkEvent) => void;
 
 /**
  * Entry in the inference log.
@@ -130,4 +134,65 @@ export interface InferenceLogEntry {
   };
   /** Stop reason from the model */
   stopReason?: string;
+}
+
+/**
+ * Entry in the process log - records a processed event with all module responses.
+ */
+export interface ProcessLogEntry {
+  timestamp: number;
+  /** The process event that was handled */
+  processEvent: ProcessEvent;
+  /** Responses from all modules, or blob ID if large */
+  responses: ModuleProcessResponse[] | { blobId: string };
+}
+
+/**
+ * Query options for process logs.
+ */
+export interface ProcessLogQuery {
+  /** Filter by process event type */
+  eventType?: string;
+  /** Filter by module name (modules that responded) */
+  moduleName?: string;
+  /** Max number of logs to return */
+  limit?: number;
+  /** Skip first N logs (for pagination) */
+  offset?: number;
+  /** Search pattern for content (regex) */
+  pattern?: string;
+}
+
+/**
+ * Result from querying process logs.
+ */
+export interface ProcessLogQueryResult {
+  entries: ProcessLogEntryWithId[];
+  total: number;
+  hasMore: boolean;
+}
+
+/**
+ * Process log entry with Chronicle sequence ID.
+ */
+export interface ProcessLogEntryWithId {
+  sequence: number;
+  entry: ProcessLogEntry;
+  /** Summary for display without resolving blobs */
+  summary?: ProcessLogSummary;
+}
+
+/**
+ * Summary view of a process log (without full responses).
+ */
+export interface ProcessLogSummary {
+  timestamp: number;
+  eventType: string;
+  moduleCount: number;
+  /** Modules that requested inference */
+  modulesRequestingInference: string[];
+  /** Modules that added messages */
+  modulesAddingMessages: string[];
+  /** Whether responses are stored as blob */
+  responsesIsBlob: boolean;
 }

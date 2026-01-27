@@ -11,7 +11,8 @@ import type { ContentBlock } from 'membrane';
 import type {
   Module,
   ModuleContext,
-  QueueEvent,
+  ProcessState,
+  ProcessEvent,
   EventResponse,
   ToolDefinition,
   ToolCall,
@@ -24,6 +25,9 @@ import type {
   ConversationContext,
   DiscordClientInterface,
   DiscordMessageData,
+  DiscordMessageEvent,
+  DiscordEditEvent,
+  DiscordDeleteEvent,
   SendInput,
   SendDMInput,
   ReplyInput,
@@ -34,7 +38,11 @@ import type {
   SetReplyContextInput,
 } from './types.js';
 
+// Re-export event types for consumers who want to handle them
+export type { DiscordMessageEvent, DiscordEditEvent, DiscordDeleteEvent } from './types.js';
+
 export * from './types.js';
+export { DiscordJsClient, type DiscordJsClientConfig } from './discord-js-client.js';
 
 const DEFAULT_CONFIG: Partial<DiscordModuleConfig> = {
   handleDMs: true,
@@ -276,26 +284,85 @@ export class DiscordModule implements Module {
     }
   }
 
-  async onEvent(event: QueueEvent): Promise<EventResponse> {
-    // Handle external messages from Discord - trigger inference
-    if (event.type === 'external-message' && event.source === 'discord') {
-      // The message was already added to conversation in handleDiscordMessage()
-      // Here we just signal that inference should run
-      const targetAgents = event.targetAgents;
+  async onProcess(event: ProcessEvent, state: ProcessState): Promise<EventResponse> {
+    // Handle new Discord message
+    if (event.type === 'discord:message') {
+      const msg = event as DiscordMessageEvent;
+      const currentState = state.getState<DiscordModuleState>() ?? {
+        connectedGuilds: [],
+        conversations: {},
+        rateLimits: {},
+      };
+
+      // Build conversation state update
+      const convKey = msg.guildId ? `${msg.guildId}:${msg.channelId}` : `dm:${msg.authorId}`;
+      const conversation: ConversationContext = {
+        channelId: msg.channelId,
+        userId: msg.authorId,
+        guildId: msg.guildId ?? null,
+        replyToMessageId: msg.discordMessageId,
+        lastActivity: Date.now(),
+      };
+
+      // Update in-memory reply context (ephemeral, not persisted)
+      this.replyContexts.set('default', conversation);
+
+      // Build new state with updated conversation
+      const newState: DiscordModuleState = {
+        ...currentState,
+        conversations: {
+          ...currentState.conversations,
+          [convKey]: conversation,
+        },
+      };
+
+      // Update local state reference for tool handlers
+      this.state = newState;
+
+      // Return declarative response - framework applies all writes atomically
       return {
-        requestInference: targetAgents ?? true,
+        addMessages: [
+          {
+            participant: msg.authorName,
+            content: [{ type: 'text', text: msg.content }],
+            metadata: {
+              external: { source: 'discord', id: msg.discordMessageId },
+              timestamp: msg.timestamp,
+            },
+          },
+        ],
+        stateUpdate: newState,
+        requestInference: true,
       };
     }
 
-    // Handle message edits and deletes that came through the queue
-    if (event.type === 'message-edited' && event.source === 'discord') {
-      // Already handled by the Discord event handlers
-      return {};
+    // Handle Discord message edit
+    if (event.type === 'discord:edit') {
+      const edit = event as DiscordEditEvent;
+      const internalId = state.findMessageByExternalId('discord', edit.discordMessageId);
+      if (!internalId) {
+        return {};
+      }
+      return {
+        editMessages: [
+          {
+            messageId: internalId,
+            content: [{ type: 'text', text: edit.newContent }],
+          },
+        ],
+      };
     }
 
-    if (event.type === 'message-removed' && event.source === 'discord') {
-      // Already handled by the Discord event handlers
-      return {};
+    // Handle Discord message delete
+    if (event.type === 'discord:delete') {
+      const del = event as DiscordDeleteEvent;
+      const internalId = state.findMessageByExternalId('discord', del.discordMessageId);
+      if (!internalId) {
+        return {};
+      }
+      return {
+        removeMessages: [internalId],
+      };
     }
 
     return {};
@@ -371,81 +438,39 @@ export class DiscordModule implements Module {
       return;
     }
 
-    // Create/update conversation context
-    const convKey = message.guildId
-      ? `${message.guildId}:${message.channelId}`
-      : `dm:${message.authorId}`;
-
-    const conversation: ConversationContext = {
-      channelId: message.channelId,
-      userId: message.authorId,
-      guildId: message.guildId,
-      replyToMessageId: message.id,
-      lastActivity: Date.now(),
-    };
-
-    this.state.conversations[convKey] = conversation;
-    this.replyContexts.set('default', conversation);
-
-    // Add message to conversation
-    const messageId = this.ctx.addMessage(
-      message.authorName,
-      [{ type: 'text', text: message.content }],
-      {
-        external: { source: 'discord', id: message.id },
-        timestamp: message.timestamp,
-      }
-    );
-
-    // Push event to queue
+    // Only queue the event - all state writes happen in onProcess()
     this.ctx.queue.push({
-      type: 'external-message',
-      source: 'discord',
+      type: 'discord:message',
+      discordMessageId: message.id,
+      channelId: message.channelId,
+      guildId: message.guildId,
+      authorId: message.authorId,
+      authorName: message.authorName,
       content: message.content,
-      metadata: {
-        messageId,
-        discordMessageId: message.id,
-        channelId: message.channelId,
-        guildId: message.guildId,
-        authorId: message.authorId,
-        authorName: message.authorName,
-      },
-      triggerInference: true,
+      timestamp: message.timestamp,
+      attachments: message.attachments,
     });
-
-    // Save state
-    this.ctx.setState(this.state);
   }
 
   private handleDiscordMessageEdit(messageId: string, newContent: string): void {
     if (!this.ctx) return;
 
-    const internalId = this.ctx.findMessageByExternalId('discord', messageId);
-    if (internalId) {
-      this.ctx.editMessage(internalId, [{ type: 'text', text: newContent }]);
-
-      this.ctx.queue.push({
-        type: 'message-edited',
-        source: 'discord',
-        messageId: internalId,
-        newContent: [{ type: 'text', text: newContent }],
-      });
-    }
+    // Only queue the event - state writes happen in onProcess()
+    this.ctx.queue.push({
+      type: 'discord:edit',
+      discordMessageId: messageId,
+      newContent,
+    });
   }
 
   private handleDiscordMessageDelete(messageId: string): void {
     if (!this.ctx) return;
 
-    const internalId = this.ctx.findMessageByExternalId('discord', messageId);
-    if (internalId) {
-      this.ctx.removeMessage(internalId);
-
-      this.ctx.queue.push({
-        type: 'message-removed',
-        source: 'discord',
-        messageId: internalId,
-      });
-    }
+    // Only queue the event - state writes happen in onProcess()
+    this.ctx.queue.push({
+      type: 'discord:delete',
+      discordMessageId: messageId,
+    });
   }
 
   // ==========================================================================

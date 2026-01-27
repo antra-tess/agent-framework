@@ -37,7 +37,9 @@
   "license": "MIT",
   "dependencies": {
     "@connectome/context-manager": "file:../context-manager",
-    "chronicle": "file:../record-store",
+    "chronicle": "file:../chronicle",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.2.3",
     "membrane": "file:../membrane",
     "ws": "^8.18.0"
   },

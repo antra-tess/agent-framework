@@ -12,7 +12,8 @@ import type { JsStore } from 'chronicle';
 import type {
   Module,
   ModuleContext,
-  QueueEvent,
+  ProcessState,
+  ProcessEvent,
   EventResponse,
   ToolDefinition,
   ToolCall,
@@ -286,8 +287,8 @@ export class FilesModule implements Module {
     }
   }
 
-  async onEvent(_event: QueueEvent): Promise<EventResponse> {
-    // Files module doesn't handle events
+  async onProcess(_event: ProcessEvent, _state: ProcessState): Promise<EventResponse> {
+    // Files module doesn't handle process events
     return {};
   }
 

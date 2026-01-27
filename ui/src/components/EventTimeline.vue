@@ -7,16 +7,12 @@ const eventsStore = useEventsStore();
 
 const events = computed(() => eventsStore.filteredEvents);
 const loading = computed(() => eventsStore.loading);
-
-function formatTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleTimeString();
-}
 </script>
 
 <template>
   <div class="event-timeline">
     <div class="timeline-header">
-      <h2>Event Timeline</h2>
+      <h2>Activity Stream</h2>
       <span class="event-count">{{ events.length }} events</span>
     </div>
 

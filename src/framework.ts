@@ -8,15 +8,21 @@ import type {
   ErrorPolicy,
   ErrorAction,
   FrameworkState,
-  FrameworkEvent,
-  FrameworkEventListener,
+  TraceEvent,
+  TraceEventListener,
   InferenceLogEntry,
   InferenceLogQuery,
   InferenceLogQueryResult,
   InferenceLogEntryWithId,
   InferenceLogSummary,
-  QueueEvent,
+  ProcessLogEntry,
+  ProcessLogQuery,
+  ProcessLogQueryResult,
+  ProcessLogEntryWithId,
+  ProcessLogSummary,
+  ProcessEvent,
   EventResponse,
+  ModuleProcessResponse,
   ToolCall,
   ToolResult,
   AgentConfig,
@@ -24,12 +30,13 @@ import type {
   AgentState,
   Module,
 } from './types/index.js';
-import { EventQueueImpl } from './queue.js';
+import { ProcessQueueImpl } from './queue.js';
 import { Agent } from './agent.js';
 import { ModuleRegistry } from './module-registry.js';
 
 const FRAMEWORK_STATE_ID = 'framework/state';
 const INFERENCE_LOG_ID = 'framework/inference-log';
+const PROCESS_LOG_ID = 'framework/process-log';
 
 /**
  * Default inference policy - infer if any request exists for the agent.
@@ -68,7 +75,7 @@ export class AgentFramework {
   private store: JsStore;
   private ownsStore: boolean;
   private membrane: Membrane;
-  private queue: EventQueueImpl;
+  private queue: ProcessQueueImpl;
   private agents: Map<string, Agent> = new Map();
   private moduleRegistry: ModuleRegistry;
   private inferencePolicy: InferencePolicy;
@@ -76,9 +83,11 @@ export class AgentFramework {
   private pendingRequests: InferenceRequest[] = [];
   private running = false;
   private loopPromise: Promise<void> | null = null;
-  private eventListeners: FrameworkEventListener[] = [];
+  private traceListeners: TraceEventListener[] = [];
   private syncIntervalMs: number;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
+  private processLoggingPersist: boolean;
+  private processLoggingBroadcast: boolean;
 
   private constructor(
     store: JsStore,
@@ -86,7 +95,9 @@ export class AgentFramework {
     membrane: Membrane,
     inferencePolicy: InferencePolicy,
     errorPolicy: ErrorPolicy,
-    syncIntervalMs: number
+    syncIntervalMs: number,
+    processLoggingPersist: boolean,
+    processLoggingBroadcast: boolean
   ) {
     this.store = store;
     this.ownsStore = ownsStore;
@@ -94,7 +105,9 @@ export class AgentFramework {
     this.inferencePolicy = inferencePolicy;
     this.errorPolicy = errorPolicy;
     this.syncIntervalMs = syncIntervalMs;
-    this.queue = new EventQueueImpl();
+    this.processLoggingPersist = processLoggingPersist;
+    this.processLoggingBroadcast = processLoggingBroadcast;
+    this.queue = new ProcessQueueImpl();
 
     // Initialize module registry with callbacks
     this.moduleRegistry = new ModuleRegistry(store, this.queue, {
@@ -141,13 +154,33 @@ export class AgentFramework {
       // Already registered
     }
 
+    // Process logging config (default: disabled)
+    const processLoggingPersist = config.processLogging?.persist ?? false;
+    const processLoggingBroadcast = config.processLogging?.broadcast ?? false;
+
+    // Register process log state only if persistence is enabled
+    if (processLoggingPersist) {
+      try {
+        store.registerState({
+          id: PROCESS_LOG_ID,
+          strategy: 'append_log',
+          deltaSnapshotEvery: 100,
+          fullSnapshotEvery: 20,
+        });
+      } catch {
+        // Already registered
+      }
+    }
+
     const framework = new AgentFramework(
       store,
       ownsStore,
       config.membrane,
       config.inferencePolicy ?? new DefaultInferencePolicy(),
       config.errorPolicy ?? new DefaultErrorPolicy(),
-      config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS
+      config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS,
+      processLoggingPersist,
+      processLoggingBroadcast
     );
 
     // Create agents
@@ -218,27 +251,27 @@ export class AgentFramework {
   }
 
   /**
-   * Push an event to the queue.
+   * Push a process event to the queue.
    */
-  pushEvent(event: QueueEvent): void {
+  pushEvent(event: ProcessEvent): void {
     this.queue.push(event);
-    this.emit({ type: 'queue:event', event });
+    this.emitTrace({ type: 'process:received', processEvent: event });
   }
 
   /**
-   * Add an event listener.
+   * Add a trace event listener for observability.
    */
-  on(listener: FrameworkEventListener): void {
-    this.eventListeners.push(listener);
+  onTrace(listener: TraceEventListener): void {
+    this.traceListeners.push(listener);
   }
 
   /**
-   * Remove an event listener.
+   * Remove a trace event listener.
    */
-  off(listener: FrameworkEventListener): void {
-    const index = this.eventListeners.indexOf(listener);
+  offTrace(listener: TraceEventListener): void {
+    const index = this.traceListeners.indexOf(listener);
     if (index >= 0) {
-      this.eventListeners.splice(index, 1);
+      this.traceListeners.splice(index, 1);
     }
   }
 
@@ -247,7 +280,7 @@ export class AgentFramework {
    */
   async addModule(module: Module): Promise<void> {
     await this.moduleRegistry.addModule(module);
-    this.emit({ type: 'module:start', moduleName: module.name });
+    this.emitTrace({ type: 'module:added', moduleName: module.name });
   }
 
   /**
@@ -255,7 +288,7 @@ export class AgentFramework {
    */
   async removeModule(name: string): Promise<void> {
     await this.moduleRegistry.removeModule(name);
-    this.emit({ type: 'module:stop', moduleName: name });
+    this.emitTrace({ type: 'module:removed', moduleName: name });
   }
 
   /**
@@ -270,6 +303,30 @@ export class AgentFramework {
    */
   getAllAgents(): Agent[] {
     return Array.from(this.agents.values());
+  }
+
+  /**
+   * Get all registered modules.
+   */
+  getAllModules(): Module[] {
+    return this.moduleRegistry.getAllModules();
+  }
+
+  /**
+   * Get all available tools from all modules.
+   */
+  getAllTools(): import('./types/index.js').ToolDefinition[] {
+    return this.moduleRegistry.getAllTools();
+  }
+
+  /**
+   * Check if process logging is enabled.
+   */
+  isProcessLoggingEnabled(): { persist: boolean; broadcast: boolean } {
+    return {
+      persist: this.processLoggingPersist,
+      broadcast: this.processLoggingBroadcast,
+    };
   }
 
   /**
@@ -416,6 +473,136 @@ export class AgentFramework {
   }
 
   /**
+   * Query process logs.
+   * Returns entries with summary info (doesn't resolve blobs).
+   */
+  queryProcessLogs(query?: ProcessLogQuery): ProcessLogQueryResult {
+    const limit = query?.limit ?? 50;
+    const offset = query?.offset ?? 0;
+    const pattern = query?.pattern ? new RegExp(query.pattern, 'i') : null;
+
+    const allEntries: ProcessLogEntryWithId[] = [];
+    const stateInfo = this.store.listStates().find((s) => s.id === PROCESS_LOG_ID);
+
+    if (stateInfo) {
+      const data = this.store.getStateJson(PROCESS_LOG_ID);
+      if (Array.isArray(data)) {
+        for (let i = 0; i < data.length; i++) {
+          const entry = data[i] as ProcessLogEntry;
+
+          // Build summary
+          const responsesIsBlob = !!(
+            entry.responses &&
+            typeof entry.responses === 'object' &&
+            'blobId' in entry.responses
+          );
+
+          // Extract summary info from responses if not a blob
+          let moduleCount = 0;
+          const modulesRequestingInference: string[] = [];
+          const modulesAddingMessages: string[] = [];
+
+          if (!responsesIsBlob && Array.isArray(entry.responses)) {
+            moduleCount = entry.responses.length;
+            for (const { moduleName, response } of entry.responses) {
+              if (response.requestInference) {
+                modulesRequestingInference.push(moduleName);
+              }
+              if (response.addMessages?.length) {
+                modulesAddingMessages.push(moduleName);
+              }
+            }
+          }
+
+          const summary: ProcessLogSummary = {
+            timestamp: entry.timestamp,
+            eventType: entry.processEvent.type,
+            moduleCount,
+            modulesRequestingInference,
+            modulesAddingMessages,
+            responsesIsBlob,
+          };
+
+          allEntries.push({ sequence: i, entry, summary });
+        }
+      }
+    }
+
+    // Filter entries
+    let filtered = allEntries;
+
+    if (query?.eventType) {
+      filtered = filtered.filter((e) => e.entry.processEvent.type === query.eventType);
+    }
+
+    if (query?.moduleName) {
+      filtered = filtered.filter((e) => {
+        if (e.summary?.responsesIsBlob) return false;
+        const responses = e.entry.responses as ModuleProcessResponse[];
+        return responses.some((r) => r.moduleName === query.moduleName);
+      });
+    }
+
+    if (pattern) {
+      filtered = filtered.filter((e) => {
+        const content = JSON.stringify(e.summary);
+        return pattern.test(content);
+      });
+    }
+
+    // Reverse to get most recent first
+    filtered = filtered.reverse();
+
+    // Paginate
+    const total = filtered.length;
+    const paged = filtered.slice(offset, offset + limit);
+
+    return {
+      entries: paged,
+      total,
+      hasMore: offset + limit < total,
+    };
+  }
+
+  /**
+   * Get a specific process log entry by sequence number.
+   * Resolves blob references to full content.
+   */
+  getProcessLog(sequence: number, resolveBlobs = true): ProcessLogEntryWithId | null {
+    const data = this.store.getStateJson(PROCESS_LOG_ID);
+    if (Array.isArray(data) && sequence >= 0 && sequence < data.length) {
+      const entry = data[sequence] as ProcessLogEntry;
+
+      if (resolveBlobs && entry.responses && typeof entry.responses === 'object' && 'blobId' in entry.responses) {
+        const resolved = { ...entry };
+        const blob = this.store.getBlob((entry.responses as { blobId: string }).blobId);
+        if (blob) {
+          try {
+            resolved.responses = JSON.parse(blob.toString());
+          } catch {
+            resolved.responses = [];
+          }
+        }
+        return { sequence, entry: resolved };
+      }
+
+      return { sequence, entry };
+    }
+    return null;
+  }
+
+  /**
+   * Get the most recent process logs (tail).
+   */
+  tailProcessLogs(count = 10, eventType?: string): ProcessLogEntryWithId[] {
+    const result = this.queryProcessLogs({
+      limit: count,
+      eventType,
+    });
+    return result.entries;
+  }
+
+  /**
    * Run until the queue is empty and all agents are idle.
    * Useful for testing.
    */
@@ -454,11 +641,11 @@ export class AgentFramework {
   }
 
   private async processNextEvent(): Promise<void> {
-    // Try to get next event (with timeout to check running flag)
+    // Try to get next process event (with timeout to check running flag)
     const event = this.queue.tryPop();
 
     if (event) {
-      await this.handleEvent(event);
+      await this.handleProcessEvent(event);
     }
 
     // Check for inference requests
@@ -470,21 +657,24 @@ export class AgentFramework {
     }
   }
 
-  private async handleEvent(event: QueueEvent): Promise<void> {
-    // Dispatch to all modules
-    const responses: EventResponse[] = [];
+  private async handleProcessEvent(event: ProcessEvent): Promise<void> {
+    const startTime = Date.now();
+
+    // Dispatch to all modules, tracking responses with module names
+    const responses: ModuleProcessResponse[] = [];
     for (const module of this.moduleRegistry.getAllModules()) {
       try {
-        const response = await module.onEvent(event);
-        responses.push(response);
+        const processState = this.moduleRegistry.createProcessState(module.name);
+        const response = await module.onProcess(event, processState);
+        responses.push({ moduleName: module.name, response });
       } catch (error) {
-        console.error(`Module ${module.name} error handling event:`, error);
+        console.error(`Module ${module.name} error handling process event:`, error);
       }
     }
 
     // Apply responses
-    for (const response of responses) {
-      await this.applyEventResponse(response, event);
+    for (const { moduleName, response } of responses) {
+      await this.applyProcessResponse(response, event, moduleName);
     }
 
     // Handle tool results specially
@@ -505,14 +695,28 @@ export class AgentFramework {
         }
       }
     }
+
+    const durationMs = Date.now() - startTime;
+
+    // Always emit trace for observability (UI needs this)
+    this.emitTrace({ type: 'process:completed', processEvent: event, responses, durationMs });
+
+    // Log to Chronicle (if enabled)
+    if (this.processLoggingPersist) {
+      this.logProcessEvent(event, responses);
+    }
   }
 
-  private async applyEventResponse(response: EventResponse, event: QueueEvent): Promise<void> {
+  private async applyProcessResponse(
+    response: EventResponse,
+    event: ProcessEvent,
+    moduleName: string
+  ): Promise<void> {
     // Add messages
     if (response.addMessages) {
       for (const msg of response.addMessages) {
         const id = this.addMessage(msg.participant, msg.content, msg.metadata);
-        this.emit({ type: 'message:added', messageId: id, source: event.type });
+        this.emitTrace({ type: 'message:added', messageId: id, source: event.type });
       }
     }
 
@@ -528,6 +732,11 @@ export class AgentFramework {
       for (const id of response.removeMessages) {
         this.removeMessage(id);
       }
+    }
+
+    // Apply module state update atomically with message operations
+    if (response.stateUpdate !== undefined) {
+      this.moduleRegistry.setModuleState(moduleName, response.stateUpdate);
     }
 
     // Queue inference requests
@@ -594,7 +803,7 @@ export class AgentFramework {
   }
 
   private async runAgentInference(agent: Agent, attempt = 0, trigger?: InferenceRequest): Promise<void> {
-    this.emit({ type: 'inference:start', agentName: agent.name });
+    this.emitTrace({ type: 'inference:started', agentName: agent.name });
     const startTime = Date.now();
     const requestId = `${agent.name}-${startTime}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -603,7 +812,10 @@ export class AgentFramework {
       const result = await agent.runInference(tools);
 
       const durationMs = Date.now() - startTime;
-      this.emit({ type: 'inference:complete', agentName: agent.name, durationMs });
+      const tokenUsage = result.usage
+        ? { input: result.usage.inputTokens, output: result.usage.outputTokens }
+        : undefined;
+      this.emitTrace({ type: 'inference:completed', agentName: agent.name, durationMs, tokenUsage });
 
       // Log successful inference
       this.logInference({
@@ -644,7 +856,12 @@ export class AgentFramework {
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       const durationMs = Date.now() - startTime;
-      this.emit({ type: 'inference:error', agentName: agent.name, error: err });
+      this.emitTrace({
+        type: 'inference:failed',
+        agentName: agent.name,
+        error: err.message,
+        stack: err.stack,
+      });
 
       // Log failed inference
       this.logInference({
@@ -698,14 +915,38 @@ export class AgentFramework {
     this.store.setStateJson(INFERENCE_LOG_ID, entries);
   }
 
+  private logProcessEvent(event: ProcessEvent, responses: ModuleProcessResponse[]): void {
+    const entry: ProcessLogEntry = {
+      timestamp: Date.now(),
+      processEvent: event,
+      responses,
+    };
+
+    // Blob threshold: 10KB
+    const BLOB_THRESHOLD = 10000;
+
+    const entryToStore = { ...entry };
+    const responsesJson = JSON.stringify(responses);
+    if (responsesJson.length > BLOB_THRESHOLD) {
+      const blobId = this.store.storeBlob(Buffer.from(responsesJson), 'application/json');
+      entryToStore.responses = { blobId };
+    }
+
+    // Append to the process log state
+    const data = this.store.getStateJson(PROCESS_LOG_ID);
+    const entries = Array.isArray(data) ? data : [];
+    entries.push(entryToStore);
+    this.store.setStateJson(PROCESS_LOG_ID, entries);
+  }
+
   private dispatchToolCall(agentName: string, call: ToolCall): void {
     const colonIndex = call.name.indexOf(':');
     const moduleName = colonIndex >= 0 ? call.name.substring(0, colonIndex) : 'unknown';
 
-    this.emit({
-      type: 'tool:start',
-      moduleName,
-      toolName: call.name,
+    this.emitTrace({
+      type: 'tool:started',
+      module: moduleName,
+      tool: call.name,
       callId: call.id,
     });
 
@@ -716,10 +957,10 @@ export class AgentFramework {
       .handleToolCall(call)
       .then((result) => {
         const durationMs = Date.now() - startTime;
-        this.emit({
-          type: 'tool:complete',
-          moduleName,
-          toolName: call.name,
+        this.emitTrace({
+          type: 'tool:completed',
+          module: moduleName,
+          tool: call.name,
           callId: call.id,
           durationMs,
         });
@@ -735,12 +976,13 @@ export class AgentFramework {
       })
       .catch((error) => {
         const err = error instanceof Error ? error : new Error(String(error));
-        this.emit({
-          type: 'tool:error',
-          moduleName,
-          toolName: call.name,
+        this.emitTrace({
+          type: 'tool:failed',
+          module: moduleName,
+          tool: call.name,
           callId: call.id,
-          error: err,
+          error: err.message,
+          stack: err.stack,
         });
 
         // Push error result to queue
@@ -803,12 +1045,17 @@ export class AgentFramework {
     };
   }
 
-  private emit(event: FrameworkEvent): void {
-    for (const listener of this.eventListeners) {
+  private emitTrace(event: { type: TraceEvent['type']; [key: string]: unknown }): void {
+    const traceEvent = {
+      ...event,
+      timestamp: Date.now(),
+    } as TraceEvent;
+
+    for (const listener of this.traceListeners) {
       try {
-        listener(event);
+        listener(traceEvent);
       } catch (error) {
-        console.error('Event listener error:', error);
+        console.error('Trace listener error:', error);
       }
     }
   }

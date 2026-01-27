@@ -217,6 +217,51 @@ export interface DiscordAttachment {
 }
 
 // ============================================================================
+// Discord Custom Events (for event queue)
+// ============================================================================
+
+/**
+ * Custom event for new Discord messages.
+ * Pushed to queue by callbacks, processed in onProcess().
+ */
+export interface DiscordMessageEvent {
+  type: 'discord:message';
+  discordMessageId: string;
+  channelId: string;
+  guildId: string | null;
+  authorId: string;
+  authorName: string;
+  content: string;
+  timestamp: Date;
+  attachments: DiscordAttachment[];
+  [key: string]: unknown; // Required for CustomEvent compatibility
+}
+
+/**
+ * Custom event for Discord message edits.
+ */
+export interface DiscordEditEvent {
+  type: 'discord:edit';
+  discordMessageId: string;
+  newContent: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Custom event for Discord message deletions.
+ */
+export interface DiscordDeleteEvent {
+  type: 'discord:delete';
+  discordMessageId: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Union of all Discord custom events.
+ */
+export type DiscordEvent = DiscordMessageEvent | DiscordEditEvent | DiscordDeleteEvent;
+
+// ============================================================================
 // Discord Client Interface (for abstraction)
 // ============================================================================
 

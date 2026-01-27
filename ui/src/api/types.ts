@@ -49,3 +49,42 @@ export interface BranchInfo {
   name: string;
   isCurrent: boolean;
 }
+
+// Event Log Types
+
+export interface ModuleEventResponse {
+  moduleName: string;
+  response: EventResponse;
+}
+
+export interface EventResponse {
+  addMessages?: { participant: string; content: string }[];
+  editMessages?: { messageId: string; content: string }[];
+  removeMessages?: string[];
+  requestInference?: boolean | string[];
+  toolsChanged?: boolean;
+}
+
+export interface EventLogEntry {
+  timestamp: number;
+  event: {
+    type: string;
+    [key: string]: unknown;
+  };
+  responses: ModuleEventResponse[] | { blobId: string };
+}
+
+export interface EventLogSummary {
+  timestamp: number;
+  eventType: string;
+  moduleCount: number;
+  modulesRequestingInference: string[];
+  modulesAddingMessages: string[];
+  responsesIsBlob: boolean;
+}
+
+export interface EventLogEntryWithId {
+  sequence: number;
+  entry: EventLogEntry;
+  summary?: EventLogSummary;
+}
