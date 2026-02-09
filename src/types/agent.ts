@@ -67,7 +67,7 @@ export interface InferenceResult {
 export type AgentState =
   | { status: 'idle' }
   | { status: 'inferring'; promise: Promise<InferenceResult> }
-  | { status: 'waiting_for_tools'; pending: Map<ToolCallId, PendingToolCall> }
+  | { status: 'waiting_for_tools'; pending: Map<ToolCallId, PendingToolCall>; completed: CompletedToolCall[] }
   | { status: 'ready'; toolResults: CompletedToolCall[] };
 
 /**

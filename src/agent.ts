@@ -140,7 +140,7 @@ export class Agent {
             startedAt: Date.now(),
           });
         }
-        this._state = { status: 'waiting_for_tools', pending };
+        this._state = { status: 'waiting_for_tools', pending, completed: [] };
       } else {
         // Done, back to idle
         this._state = { status: 'idle' };
@@ -177,12 +177,11 @@ export class Agent {
     };
 
     this._state.pending.delete(callId);
+    this._state.completed.push(completed);
 
     // If all tools done, transition to ready
     if (this._state.pending.size === 0) {
-      // Gather all completed results
-      const toolResults = [completed];
-      this._state = { status: 'ready', toolResults };
+      this._state = { status: 'ready', toolResults: this._state.completed };
     }
   }
 
@@ -220,36 +219,16 @@ export class Agent {
   private async doInference(request: NormalizedRequest): Promise<InferenceResult> {
     const response = await this.membrane.complete(request);
 
-    // Use tool calls from Membrane (handles both XML and native modes)
+    // Membrane normalizes both native and XML modes to the same block structure.
+    // We receive clean content blocks: text (no XML), tool_use, thinking, etc.
     const toolCalls = response.toolCalls;
-    
-    // Extract speech content - text/thinking that should be shown to users
-    // In XML mode, we need to strip tool call XML from text blocks
-    const speechContent: ContentBlock[] = [];
-    
-    for (const block of response.content) {
-      if (block.type === 'tool_use') {
-        // Skip tool_use blocks (handled via toolCalls)
-        continue;
-      } else if (block.type === 'text') {
-        // Strip XML tool calls from text (they're handled separately)
-        let text = block.text;
-        // Remove <function_calls>...</function_calls> blocks
-        text = text.replace(/<(antml:)?function_calls>[\s\S]*?<\/(antml:)?function_calls>/g, '');
-        // Remove unclosed <function_calls> (when stopped by stop sequence)
-        text = text.replace(/<(antml:)?function_calls>[\s\S]*$/g, '');
-        // Remove *thinking* blocks (internal reasoning)
-        text = text.replace(/\*thinking\*[\s\S]*?(?=\n\n|<|$)/g, '');
-        text = text.trim();
-        
-        if (text) {
-          speechContent.push({ type: 'text', text });
-        }
-      } else if (block.type === 'thinking') {
-        // Don't include thinking in speech content - it's internal
-        continue;
-      }
-    }
+
+    // Extract speech content - text blocks that should be shown to users.
+    // Thinking blocks are internal reasoning, not speech.
+    // Tool_use blocks are handled separately via toolCalls.
+    const speechContent = response.content.filter(
+      (block): block is ContentBlock & { type: 'text' } => block.type === 'text'
+    );
 
     // Add assistant response to context (store full response including tool calls)
     this.contextManager.addMessage(this.name, response.content);
