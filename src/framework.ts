@@ -841,97 +841,14 @@ export class AgentFramework {
     }
   }
 
-  private async runAgentInference(agent: Agent, attempt = 0, trigger?: InferenceRequest): Promise<void> {
-    this.emitTrace({ type: 'inference:started', agentName: agent.name });
-    const startTime = Date.now();
-    const requestId = `${agent.name}-${startTime}-${Math.random().toString(36).slice(2, 8)}`;
-
-    try {
-      const tools = this.moduleRegistry.getAllTools().filter((t) => agent.canUseTool(t.name));
-      const result = await agent.runInference(tools);
-
-      const durationMs = Date.now() - startTime;
-      const tokenUsage = result.usage
-        ? { input: result.usage.inputTokens, output: result.usage.outputTokens }
-        : undefined;
-      this.emitTrace({ type: 'inference:completed', agentName: agent.name, durationMs, tokenUsage });
-
-      // Log successful inference
-      this.logInference({
-        timestamp: startTime,
-        agentName: agent.name,
-        requestId,
-        success: true,
-        request: result.raw?.request ?? { note: 'request not captured' },
-        response: result.raw?.response ?? { note: 'response not captured' },
-        durationMs,
-        tokenUsage: result.usage
-          ? { input: result.usage.inputTokens, output: result.usage.outputTokens }
-          : undefined,
-        stopReason: result.stopReason,
-      });
-
-      // Dispatch speech to handlers
-      if (result.speechContent.length > 0) {
-        const speechContext = {
-          turnComplete: result.toolCalls.length === 0,
-          trigger: trigger ?? {
-            reason: 'unknown',
-            source: 'unknown',
-            timestamp: Date.now(),
-          },
-        };
-        await this.moduleRegistry.dispatchSpeech(
-          agent.name,
-          result.speechContent,
-          speechContext
-        );
-      }
-
-      // Dispatch tool calls
-      for (const call of result.toolCalls) {
-        this.dispatchToolCall(agent.name, call);
-      }
-    } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      const durationMs = Date.now() - startTime;
-      this.emitTrace({
-        type: 'inference:failed',
-        agentName: agent.name,
-        error: err.message,
-        stack: err.stack,
-      });
-
-      // Log failed inference
-      this.logInference({
-        timestamp: startTime,
-        agentName: agent.name,
-        requestId,
-        success: false,
-        error: err.message,
-        request: { note: 'request may have failed before capture' },
-        durationMs,
-      });
-
-      // Handle error with policy
-      const action = this.errorPolicy.onInferenceError(err, agent.name, attempt);
-      if (action.retry) {
-        await new Promise((resolve) => setTimeout(resolve, action.delayMs));
-        await this.runAgentInference(agent, attempt + 1, trigger);
-      } else if (action.emit) {
-        this.pushEvent(action.emit);
-      }
-    }
-  }
-
-  private async startAgentStream(agent: Agent, trigger?: InferenceRequest): Promise<void> {
+  private async startAgentStream(agent: Agent, trigger?: InferenceRequest, attempt = 0): Promise<void> {
     this.emitTrace({ type: 'inference:started', agentName: agent.name });
 
     try {
       const tools = this.moduleRegistry.getAllTools().filter((t) => agent.canUseTool(t.name));
       const stream = await agent.startStream(tools);
 
-      const handle = this.driveStream(agent, stream, trigger);
+      const handle = this.driveStream(agent, stream, trigger, attempt);
       this.activeStreams.set(agent.name, handle);
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -943,10 +860,10 @@ export class AgentFramework {
       });
       agent.reset();
 
-      const action = this.errorPolicy.onInferenceError(err, agent.name, 0);
+      const action = this.errorPolicy.onInferenceError(err, agent.name, attempt);
       if (action.retry) {
         await new Promise((resolve) => setTimeout(resolve, action.delayMs));
-        await this.startAgentStream(agent, trigger);
+        await this.startAgentStream(agent, trigger, attempt + 1);
       } else if (action.emit) {
         this.pushEvent(action.emit);
       }
@@ -956,7 +873,8 @@ export class AgentFramework {
   private async driveStream(
     agent: Agent,
     stream: YieldingStream,
-    trigger?: InferenceRequest
+    trigger?: InferenceRequest,
+    attempt = 0
   ): Promise<void> {
     const startTime = Date.now();
     const requestId = `${agent.name}-${startTime}-${Math.random().toString(36).slice(2, 8)}`;
@@ -983,7 +901,7 @@ export class AgentFramework {
             for (const call of event.calls) {
               this.dispatchToolCall(agent.name, call);
             }
-            // Loop naturally pauses here — stream is waiting for provideToolResults()
+            // Stream's async iterator blocks on next() until provideToolResults() is called
             break;
 
           case 'complete': {
@@ -1025,7 +943,7 @@ export class AgentFramework {
             // Dispatch speech
             if (speechContent.length > 0) {
               const speechContext = {
-                turnComplete: response.toolCalls.length === 0,
+                turnComplete: true,
                 trigger: trigger ?? {
                   reason: 'unknown',
                   source: 'unknown',
@@ -1066,10 +984,10 @@ export class AgentFramework {
 
             agent.reset();
 
-            const action = this.errorPolicy.onInferenceError(err, agent.name, 0);
+            const action = this.errorPolicy.onInferenceError(err, agent.name, attempt);
             if (action.retry) {
               await new Promise((resolve) => setTimeout(resolve, action.delayMs));
-              await this.startAgentStream(agent, trigger);
+              await this.startAgentStream(agent, trigger, attempt + 1);
             } else if (action.emit) {
               this.pushEvent(action.emit);
             }

@@ -41,6 +41,7 @@ class MockYieldingStream implements YieldingStream {
   private _pendingToolCallIds: string[] = [];
   private _toolDepth = 0;
   private pendingResolve: (() => void) | null = null;
+  receivedToolResults: unknown[][] = [];
 
   constructor(private responses: NormalizedResponse[]) {
     this.processResponse(0);
@@ -93,8 +94,9 @@ class MockYieldingStream implements YieldingStream {
     }
   }
 
-  provideToolResults(_results: unknown[]): void {
+  provideToolResults(results: unknown[]): void {
     if (!this._isWaitingForTools) throw new Error('Not waiting for tools');
+    this.receivedToolResults.push(results);
     this._isWaitingForTools = false;
     this._pendingToolCallIds = [];
     this._toolDepth++;
@@ -170,6 +172,7 @@ function createMockResponse(
 class MockMembrane implements MinimalMembrane {
   responses: NormalizedResponse[] = [];
   calls: NormalizedRequest[] = [];
+  lastStream: MockYieldingStream | null = null;
   private responseIndex = 0;
 
   pushResponse(response: NormalizedResponse): void {
@@ -190,7 +193,9 @@ class MockMembrane implements MinimalMembrane {
     // All remaining queued responses feed the stream
     const remaining = this.responses.slice(this.responseIndex);
     this.responseIndex = this.responses.length;
-    return new MockYieldingStream(remaining);
+    const stream = new MockYieldingStream(remaining);
+    this.lastStream = stream;
+    return stream;
   }
 
   // Cast helper - use this when passing to framework
@@ -750,6 +755,45 @@ describe('Streaming lifecycle', () => {
     assert.ok(events.includes('inference:tool_calls_yielded'), 'Should emit tool_calls_yielded');
     assert.ok(events.includes('inference:stream_resumed'), 'Should emit stream_resumed');
     assert.ok(events.includes('inference:completed'), 'Should emit completed');
+
+    await framework.stop();
+    rmSync(tempDir, { recursive: true });
+  });
+
+  it('should convert AF tool results to Membrane format when resuming stream', async () => {
+    const testModule = new TestModule();
+
+    membrane.pushResponse(createMockResponse([
+      { type: 'tool_use', id: 'call_conv', name: 'test:echo', input: { message: 'convert' } },
+    ], 'tool_use'));
+    membrane.pushResponse(createMockResponse([
+      { type: 'text', text: 'Converted' },
+    ]));
+
+    const framework = await AgentFramework.create({
+      storePath: join(tempDir, 'test.chronicle'),
+      membrane: membrane.asMembrane(),
+      agents: [{ name: 'assistant', model: 'test-model', systemPrompt: 'Test' }],
+      modules: [testModule],
+    });
+
+    framework.pushEvent({
+      type: 'external-message',
+      source: 'test',
+      content: 'Convert test',
+      metadata: {},
+    });
+
+    await framework.runUntilIdle();
+
+    // Verify the mock stream received correctly converted tool results
+    const stream = membrane.lastStream!;
+    assert.strictEqual(stream.receivedToolResults.length, 1);
+    const results = stream.receivedToolResults[0] as Array<{ toolUseId: string; content: string; isError?: boolean }>;
+    assert.strictEqual(results.length, 1);
+    assert.strictEqual(results[0].toolUseId, 'call_conv');
+    assert.strictEqual(results[0].content, JSON.stringify({ echoed: 'convert' }));
+    assert.strictEqual(results[0].isError, undefined);
 
     await framework.stop();
     rmSync(tempDir, { recursive: true });

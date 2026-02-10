@@ -197,7 +197,6 @@ export class Agent {
       throw new Error(`Agent ${this.name} cannot start stream in state ${this._state.status}`);
     }
 
-    const tools = availableTools.filter((t) => this.canUseTool(t.name));
     const messages = await this.contextManager.compile(budget);
 
     const request: NormalizedRequest = {
@@ -208,7 +207,7 @@ export class Agent {
         maxTokens: this.maxTokens,
         temperature: this.temperature,
       },
-      tools: tools.length > 0 ? tools : undefined,
+      tools: availableTools.length > 0 ? availableTools : undefined,
     };
 
     const stream = this.membrane.streamYielding(request, {
