@@ -76,8 +76,15 @@ export interface ModuleContext {
 
   /**
    * Process queue for pushing events from external listeners.
+   * @deprecated Use pushEvent() instead — it also emits process:received traces.
    */
   readonly queue: ProcessQueue;
+
+  /**
+   * Push a process event to the queue and emit a process:received trace.
+   * Preferred over direct queue.push() for proper observability.
+   */
+  pushEvent(event: ProcessEvent): void;
 
   /**
    * Get another module by name.
@@ -182,8 +189,15 @@ export interface ProcessState {
 
   /**
    * Queue for emitting follow-up events.
+   * @deprecated Use pushEvent() instead — it also emits process:received traces.
    */
   readonly queue: ProcessQueue;
+
+  /**
+   * Push a process event to the queue and emit a process:received trace.
+   * Preferred over direct queue.push() for proper observability.
+   */
+  pushEvent(event: ProcessEvent): void;
 }
 
 /**

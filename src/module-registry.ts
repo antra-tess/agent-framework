@@ -19,6 +19,7 @@ import type {
   ExternalIdRef,
   SpeechContext,
   SpeechHandlerOptions,
+  ProcessEvent,
 } from './types/index.js';
 import type { Agent } from './agent.js';
 
@@ -50,6 +51,8 @@ export class ModuleRegistry {
   private getMessageFn: (id: MessageId) => StoredMessage | null;
   private queryMessagesFn: (filter: MessageQuery) => MessageQueryResult;
 
+  private pushEventFn: (event: ProcessEvent) => void;
+
   constructor(
     store: JsStore,
     queue: ProcessQueue,
@@ -60,6 +63,7 @@ export class ModuleRegistry {
       removeMessage: (id: MessageId) => void;
       getMessage: (id: MessageId) => StoredMessage | null;
       queryMessages: (filter: MessageQuery) => MessageQueryResult;
+      pushEvent: (event: ProcessEvent) => void;
     }
   ) {
     this.store = store;
@@ -70,6 +74,7 @@ export class ModuleRegistry {
     this.removeMessageFn = options.removeMessage;
     this.getMessageFn = options.getMessage;
     this.queryMessagesFn = options.queryMessages;
+    this.pushEventFn = options.pushEvent;
   }
 
   /**
@@ -108,7 +113,8 @@ export class ModuleRegistry {
       this.editMessageFn,
       this.removeMessageFn,
       this.getMessageFn,
-      this.queryMessagesFn
+      this.queryMessagesFn,
+      this.pushEventFn
     );
 
     this.modules.set(module.name, module);
@@ -332,6 +338,7 @@ class ModuleContextImpl implements ModuleContext {
   private removeMessageFn: (id: MessageId) => void;
   private getMessageFn: (id: MessageId) => StoredMessage | null;
   private queryMessagesFn: (filter: MessageQuery) => MessageQueryResult;
+  private pushEventFn: (event: ProcessEvent) => void;
 
   // External ID mapping stored in module state
   private externalIdMap: Map<string, MessageId> = new Map();
@@ -348,7 +355,8 @@ class ModuleContextImpl implements ModuleContext {
     editMessage: (id: MessageId, content: ContentBlock[]) => void,
     removeMessage: (id: MessageId) => void,
     getMessage: (id: MessageId) => StoredMessage | null,
-    queryMessages: (filter: MessageQuery) => MessageQueryResult
+    queryMessages: (filter: MessageQuery) => MessageQueryResult,
+    pushEvent: (event: ProcessEvent) => void
   ) {
     this.moduleName = moduleName;
     this.store = store;
@@ -362,6 +370,7 @@ class ModuleContextImpl implements ModuleContext {
     this.removeMessageFn = removeMessage;
     this.getMessageFn = getMessage;
     this.queryMessagesFn = queryMessages;
+    this.pushEventFn = pushEvent;
 
     // Load external ID map from state if exists
     const state = this.getState<{ externalIdMap?: Record<string, string> }>();
@@ -454,6 +463,10 @@ class ModuleContextImpl implements ModuleContext {
     this.registry.unregisterSpeechHandler(this.moduleName);
   }
 
+  pushEvent(event: ProcessEvent): void {
+    this.pushEventFn(event);
+  }
+
   private persistExternalIdMap(): void {
     const currentState = this.getState<object>() ?? {};
     this.setState({
@@ -499,5 +512,9 @@ class ProcessStateImpl implements ProcessState {
 
   get queue(): ProcessQueue {
     return this.ctx.queue;
+  }
+
+  pushEvent(event: ProcessEvent): void {
+    this.ctx.pushEvent(event);
   }
 }

@@ -124,6 +124,7 @@ export class AgentFramework {
       removeMessage: (id) => this.removeMessage(id),
       getMessage: (id) => this.getMessage(id),
       queryMessages: (filter) => this.queryMessages(filter),
+      pushEvent: (event) => this.pushEvent(event),
     });
   }
 
