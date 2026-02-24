@@ -196,6 +196,20 @@ export interface McplServerConfig {
    * Default: 5000 (5 seconds).
    */
   reconnectIntervalMs?: number;
+
+  /**
+   * Optional callback to filter which incoming channel messages should trigger
+   * agent inference. Receives the text content and message metadata.
+   * Return true to trigger inference, false to silently accept the message.
+   *
+   * Common metadata fields servers may provide:
+   * - mentionIds: string[] — user IDs mentioned in the message
+   * - replyToAuthorId: string — user ID of the author being replied to
+   * - botUserId: string — the server's bot/self user ID
+   *
+   * If not provided, all incoming messages trigger inference.
+   */
+  shouldTriggerInference?: (content: string, metadata: Record<string, unknown>) => boolean;
 }
 
 // ============================================================================

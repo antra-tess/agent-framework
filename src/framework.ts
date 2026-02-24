@@ -1406,6 +1406,9 @@ export class AgentFramework {
     );
 
     // Channel registry (Step 7)
+    // Find shouldTriggerInference callback from server configs (first one wins)
+    const triggerFilter = serverConfigs.find(c => c.shouldTriggerInference)?.shouldTriggerInference;
+
     this.channelRegistry = new ChannelRegistry(
       this.mcplServerRegistry,
       this.featureSetManager,
@@ -1418,6 +1421,7 @@ export class AgentFramework {
             server.sendChannelsTyping(channelId);
           }
         },
+        shouldTriggerInference: triggerFilter,
       },
     );
 

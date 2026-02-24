@@ -39,8 +39,9 @@ import type {
 
 import { McplMethod } from './types.js';
 
-/** Timeout for the initialize handshake in milliseconds. */
-const INITIALIZE_TIMEOUT_MS = 10_000;
+/** Timeout for the initialize handshake in milliseconds.
+ *  Spring Boot + JDA servers can take 5-10s to boot, so 30s is safe. */
+const INITIALIZE_TIMEOUT_MS = 30_000;
 
 /** MCP protocol version used in the initialize handshake. */
 const MCP_PROTOCOL_VERSION = '2024-11-05';
