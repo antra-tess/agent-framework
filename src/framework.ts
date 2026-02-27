@@ -450,25 +450,24 @@ export class AgentFramework {
    *
    * Used by SubagentModule (and similar) to create short-lived agents
    * that are driven externally (not by the framework's event loop).
-   * The returned agent has its own ContextManager on a unique namespace
-   * but shares the same Chronicle store.
+   * The returned agent has its own ContextManager on a namespaced state
+   * within the framework's shared Chronicle store — messages go to
+   * `{namespace}/messages`, context log to `{namespace}/context`.
    *
-   * Call cleanup() when done to release resources.
+   * Data persists after cleanup for investigation and cross-revert.
+   * Call cleanup() when done to release the ContextManager.
    */
   async createEphemeralAgent(config: AgentConfig): Promise<{
     agent: Agent;
     contextManager: ContextManager;
     cleanup: () => void;
   }> {
-    // Ephemeral agents get their own isolated store so their messages
-    // don't leak into the parent's shared message store.
-    const { mkdtempSync, rmSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const { tmpdir } = await import('node:os');
-    const tempPath = mkdtempSync(join(tmpdir(), `af-ephemeral-${config.name}-`));
+    const namespace = `subagent/${config.name}`;
 
     const contextManager = await ContextManager.open({
-      path: join(tempPath, 'store'),
+      store: this.store,
+      namespace,
+      isolate: true,
       strategy: config.strategy ?? new PassthroughStrategy(),
       membrane: this.membrane,
     });
@@ -476,12 +475,8 @@ export class AgentFramework {
     const agent = new Agent(config, contextManager, this.membrane);
 
     const cleanup = () => {
-      try {
-        contextManager.close();
-        rmSync(tempPath, { recursive: true, force: true });
-      } catch {
-        // Best-effort cleanup
-      }
+      // Don't close the store — it's shared. Just release the CM.
+      // Data persists in the store under the namespace for investigation.
     };
 
     return { agent, contextManager, cleanup };
