@@ -959,15 +959,28 @@ export class AgentFramework {
             this.pendingAssistantBlocks.delete(agent.name);
           }
 
+          // Compute truncation limit from agent's strategy (maxMessageTokens * 4 chars)
+          const maxChars = this.getMaxToolResultChars(agent);
+
           // Store tool results as a user message (tool_result blocks)
-          const toolResultContent: ContentBlock[] = currentState.toolResults.map(tc => ({
-            type: 'tool_result' as const,
-            toolUseId: tc.id,
-            content: tc.result.isError
-              ? (tc.result.error ?? 'Unknown error')
-              : JSON.stringify(tc.result.data),
-            isError: tc.result.isError,
-          }));
+          const toolResultContent: ContentBlock[] = currentState.toolResults.map(tc => {
+            let content: string;
+            if (tc.result.isError) {
+              content = tc.result.error ?? 'Unknown error';
+            } else {
+              content = JSON.stringify(tc.result.data);
+              if (maxChars && content.length > maxChars) {
+                content = content.slice(0, maxChars)
+                  + '\n\n[truncated — original was ' + content.length + ' chars]';
+              }
+            }
+            return {
+              type: 'tool_result' as const,
+              toolUseId: tc.id,
+              content,
+              isError: tc.result.isError,
+            };
+          });
           agent.getContextManager().addMessage('user', toolResultContent);
 
           // Check if any tool result requested endTurn
@@ -983,7 +996,7 @@ export class AgentFramework {
           } else if (currentState.stream) {
             // Streaming path: convert results and resume the stream
             const membraneResults = currentState.toolResults.map(tc =>
-              this.toMembraneToolResult(tc.id, tc.result)
+              this.toMembraneToolResult(tc.id, tc.result, maxChars)
             );
             currentState.stream.provideToolResults(membraneResults);
             agent.setStreaming(currentState.stream);
@@ -1537,14 +1550,25 @@ export class AgentFramework {
     }
   }
 
-  private toMembraneToolResult(callId: string, afResult: ToolResult): MembraneToolResult {
-    return {
-      toolUseId: callId,
-      content: afResult.isError
-        ? (afResult.error ?? 'Unknown error')
-        : JSON.stringify(afResult.data),
-      isError: afResult.isError,
-    };
+  private toMembraneToolResult(callId: string, afResult: ToolResult, maxChars?: number): MembraneToolResult {
+    let content: string;
+    if (afResult.isError) {
+      content = afResult.error ?? 'Unknown error';
+    } else {
+      content = JSON.stringify(afResult.data);
+      if (maxChars && content.length > maxChars) {
+        content = content.slice(0, maxChars)
+          + '\n\n[truncated — original was ' + content.length + ' chars]';
+      }
+    }
+    return { toolUseId: callId, content, isError: afResult.isError };
+  }
+
+  private getMaxToolResultChars(agent: Agent): number | undefined {
+    const strategy = agent.getContextManager().getStrategy();
+    const maxTokens = strategy.maxMessageTokens;
+    if (maxTokens && maxTokens > 0) return maxTokens * 4;
+    return undefined;
   }
 
   private logInference(entry: InferenceLogEntry): void {
