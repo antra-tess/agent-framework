@@ -33,7 +33,7 @@ export class Agent {
   private _state: AgentState = { status: 'idle' };
   private _streamId = 0;
   lastStreamInputTokens = 0;
-  readonly maxStreamTokens: number;
+  maxStreamTokens: number;
   private contextManager: ContextManager;
   private membrane: Membrane;
 
