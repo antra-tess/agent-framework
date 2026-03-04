@@ -1714,35 +1714,38 @@ export class AgentFramework {
   }
 
   private dispatchToolCall(agentName: string, call: ToolCall): void {
+    // Enrich call with caller identity so modules can resolve the calling agent
+    const enrichedCall: ToolCall = { ...call, callerAgentName: agentName };
+
     // Route MCPL tool calls to the appropriate server via prefix map
-    const mcplMatch = this.resolveMcplTool(call.name);
+    const mcplMatch = this.resolveMcplTool(enrichedCall.name);
     if (mcplMatch && this.mcplServerRegistry) {
-      this.dispatchMcplToolCall(agentName, call, mcplMatch[0], mcplMatch[1]);
+      this.dispatchMcplToolCall(agentName, enrichedCall, mcplMatch[0], mcplMatch[1]);
       return;
     }
 
     // Route synthesized channel tools
-    if (call.name.startsWith('channel_') && this.channelRegistry) {
-      this.dispatchChannelToolCall(agentName, call);
+    if (enrichedCall.name.startsWith('channel_') && this.channelRegistry) {
+      this.dispatchChannelToolCall(agentName, enrichedCall);
       return;
     }
 
-    const colonIndex = call.name.indexOf(':');
-    const moduleName = colonIndex >= 0 ? call.name.substring(0, colonIndex) : 'unknown';
+    const colonIndex = enrichedCall.name.indexOf(':');
+    const moduleName = colonIndex >= 0 ? enrichedCall.name.substring(0, colonIndex) : 'unknown';
 
     this.emitTrace({
       type: 'tool:started',
       module: moduleName,
-      tool: call.name,
-      callId: call.id,
-      input: call.input,
+      tool: enrichedCall.name,
+      callId: enrichedCall.id,
+      input: enrichedCall.input,
     });
 
     const startTime = Date.now();
 
     // Execute tool asynchronously
     this.moduleRegistry
-      .handleToolCall(call)
+      .handleToolCall(enrichedCall)
       .then((result) => {
         const durationMs = Date.now() - startTime;
         this.emitTrace({

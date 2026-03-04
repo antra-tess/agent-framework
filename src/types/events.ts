@@ -189,6 +189,8 @@ export interface ToolCall {
   name: string;
   /** Tool input */
   input: unknown;
+  /** The agent that made this tool call. Set by the framework dispatch layer. */
+  callerAgentName?: string;
 }
 
 // ============================================================================

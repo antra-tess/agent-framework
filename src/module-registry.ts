@@ -228,11 +228,12 @@ export class ModuleRegistry {
       };
     }
 
-    // Create a call with the un-prefixed name
+    // Create a call with the un-prefixed name (preserving caller identity)
     const moduleCall: ToolCall = {
       id: call.id,
       name: toolName,
       input: call.input,
+      callerAgentName: call.callerAgentName,
     };
 
     try {
