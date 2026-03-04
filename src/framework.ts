@@ -411,7 +411,11 @@ export class AgentFramework {
     if (!agent) {
       return false;
     }
-    return agent.abortInference(reason);
+    const aborted = agent.abortInference(reason);
+    if (aborted) {
+      this.emitTrace({ type: 'inference:aborted', agentName, reason });
+    }
+    return aborted;
   }
 
   /**

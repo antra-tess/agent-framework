@@ -409,12 +409,18 @@ export class Agent {
   }
 
   abortInference(reason?: string): boolean {
-    if (this._state.status !== 'inferring') {
-      return false;
+    if (this._state.status === 'inferring') {
+      this._state.abortController.abort(reason);
+      return true;
     }
 
-    this._state.abortController.abort(reason);
-    return true;
+    if (this._state.status === 'streaming' ||
+        (this._state.status === 'waiting_for_tools' && this._state.stream)) {
+      this.cancelStream();
+      return true;
+    }
+
+    return false;
   }
 
   private async doInference(
