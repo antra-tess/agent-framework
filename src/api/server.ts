@@ -309,6 +309,14 @@ export class ApiServer {
       case 'branch.delete':
         return this.cmdBranchDelete(params as unknown as BranchDeleteParams);
 
+      // Undo/Redo
+      case 'undo':
+        return this.cmdUndo(params as unknown as { agentName: string });
+      case 'redo':
+        return this.cmdRedo(params as unknown as { agentName: string });
+      case 'undo.state':
+        return this.cmdUndoState(params as unknown as { agentName: string });
+
       // Inspection
       case 'agent.list':
         return this.cmdAgentList();
@@ -491,6 +499,56 @@ export class ApiServer {
     this.broadcast('branch:deleted', { name: params.name });
 
     return { deleted: true };
+  }
+
+  // ==========================================================================
+  // Undo/Redo Commands
+  // ==========================================================================
+
+  private cmdUndo(params: { agentName: string }): unknown {
+    if (!params.agentName) {
+      throw new Error('agentName is required');
+    }
+
+    const result = this.framework.undoLastTurn(params.agentName);
+
+    if (result.undone) {
+      this.currentBranch = result.toBranch!;
+      this.broadcast('branch:switched', {
+        from: result.fromBranch,
+        to: result.toBranch,
+        reason: 'undo',
+      });
+    }
+
+    return result;
+  }
+
+  private cmdRedo(params: { agentName: string }): unknown {
+    if (!params.agentName) {
+      throw new Error('agentName is required');
+    }
+
+    const result = this.framework.redo(params.agentName);
+
+    if (result.redone) {
+      this.currentBranch = result.toBranch!;
+      this.broadcast('branch:switched', {
+        from: result.fromBranch,
+        to: result.toBranch,
+        reason: 'redo',
+      });
+    }
+
+    return result;
+  }
+
+  private cmdUndoState(params: { agentName: string }): unknown {
+    if (!params.agentName) {
+      throw new Error('agentName is required');
+    }
+
+    return this.framework.getUndoRedoState(params.agentName);
   }
 
   // ==========================================================================

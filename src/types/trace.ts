@@ -121,11 +121,42 @@ export type TraceEvent =
   | (TraceEventBase & { type: 'module:added'; moduleName: string })
   | (TraceEventBase & { type: 'module:removed'; moduleName: string })
 
+  // Inference request health
+  | (TraceEventBase & {
+      type: 'inference:request_dropped';
+      agentName: string;
+      reason: string;
+      requestCount: number;
+      oldestRequestAge: number;
+    })
+  | (TraceEventBase & {
+      type: 'inference:request_stale';
+      agentName: string;
+      agentStatus: string;
+      requestCount: number;
+      oldestRequestAge: number;
+    })
+
   // Message lifecycle
   | (TraceEventBase & {
       type: 'message:added';
       messageId: string;
       source: string;
+    })
+
+  // Undo/redo lifecycle
+  | (TraceEventBase & {
+      type: 'undo:completed';
+      agentName: string;
+      turnIndex: number;
+      fromBranch: string;
+      toBranch: string;
+    })
+  | (TraceEventBase & {
+      type: 'redo:completed';
+      agentName: string;
+      fromBranch: string;
+      toBranch: string;
     });
 
 /**

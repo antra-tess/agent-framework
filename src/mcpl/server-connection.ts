@@ -84,6 +84,10 @@ export class McplServerConnection extends EventEmitter {
   private pendingRequests = new Map<string | number, PendingRequest>();
   private closed = false;
 
+  // Event buffering: events emitted before ready() are queued, not lost
+  private readyFlag = false;
+  private bufferedEvents: Array<{ event: string; args: unknown[] }> = [];
+
   // Reconnect state (adapted from Anarchid/agent-framework@mcpl-module-proto)
   private config: McplServerConfig | null = null;
   private hostCapabilities: McplHostCapabilities | null = null;
@@ -111,6 +115,36 @@ export class McplServerConnection extends EventEmitter {
       this.setupMessageRouting();
       this.setupLifecycle();
     }
+  }
+
+  // ==========================================================================
+  // Event buffering
+  // ==========================================================================
+
+  /**
+   * Mark the connection as ready — flushes any events that arrived between
+   * construction (when setupMessageRouting starts emitting) and now (when
+   * the caller has attached listeners via wireMcplEvents).
+   */
+  ready(): void {
+    this.readyFlag = true;
+    for (const { event, args } of this.bufferedEvents) {
+      super.emit(event, ...args);
+    }
+    this.bufferedEvents = [];
+  }
+
+  /**
+   * Override emit to buffer server→host events until ready() is called.
+   * Lifecycle events ('close', 'error', 'reconnect') always pass through.
+   */
+  override emit(event: string | symbol, ...args: unknown[]): boolean {
+    const name = typeof event === 'string' ? event : '';
+    if (this.readyFlag || name === 'close' || name === 'error' || name === 'reconnect') {
+      return super.emit(event, ...args);
+    }
+    this.bufferedEvents.push({ event: name, args });
+    return true;
   }
 
   // ==========================================================================
@@ -468,6 +502,7 @@ export class McplServerConnection extends EventEmitter {
       // Re-wire message routing and lifecycle on the new process
       this.setupMessageRouting();
       this.setupLifecycle();
+      this.readyFlag = true; // Listeners already attached from initial wire
 
       console.error(`MCPL server "${this.id}" reconnected successfully`);
       this.emit('reconnect');

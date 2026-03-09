@@ -68,6 +68,23 @@ import type { ContextInjection } from '@connectome/context-manager';
 const FRAMEWORK_STATE_ID = 'framework/state';
 const INFERENCE_LOG_ID = 'framework/inference-log';
 const PROCESS_LOG_ID = 'framework/process-log';
+const TURN_CHECKPOINTS_ID = 'framework/turn-checkpoints';
+
+/** Maximum number of turn checkpoints to keep per agent. */
+const MAX_TURN_CHECKPOINTS = 20;
+
+interface TurnCheckpoint {
+  agentName: string;
+  turnIndex: number;
+  sequenceBefore: number;
+  branchName: string;
+  timestamp: number;
+}
+
+interface RedoEntry {
+  branchName: string;
+  checkpoint: TurnCheckpoint;
+}
 
 /**
  * Default inference policy - infer if any request exists for the agent.
@@ -121,6 +138,10 @@ export class AgentFramework {
   private processLoggingBroadcast: boolean;
   private activeStreams: Map<string, Promise<void>> = new Map();
   private pendingAssistantBlocks: Map<string, ContentBlock[]> = new Map();
+
+  // Undo/redo state
+  private turnCounters: Map<string, number> = new Map(); // agentName → next turnIndex
+  private redoStacks: Map<string, RedoEntry[]> = new Map(); // agentName → redo entries
 
   // MCPL subsystems (null when no mcplServers configured)
   private mcplServerRegistry: McplServerRegistry | null = null;
@@ -203,6 +224,12 @@ export class AgentFramework {
         deltaSnapshotEvery: 100,
         fullSnapshotEvery: 20,
       });
+    } catch {
+      // Already registered
+    }
+
+    try {
+      store.registerState({ id: TURN_CHECKPOINTS_ID, strategy: 'snapshot' });
     } catch {
       // Already registered
     }
@@ -520,13 +547,31 @@ export class AgentFramework {
       let speech = '';
       let toolCallsCount = 0;
       let settled = false;
+      let inferenceStarted = false;
+
+      const STARTUP_TIMEOUT_MS = 30_000;
 
       const cleanup = () => {
         if (settled) return;
         settled = true;
+        clearTimeout(startupWatchdog);
         this.offTrace(traceListener);
         this.agents.delete(agent.name);
       };
+
+      // Watchdog: if inference never starts within 30s, the agent is a zombie.
+      // This catches cases where the event loop stalled, the agent was
+      // deregistered, or processInferenceRequests() skipped the request.
+      const startupWatchdog = setTimeout(() => {
+        if (!inferenceStarted && !settled) {
+          cleanup();
+          reject(new Error(
+            `Ephemeral agent "${agent.name}" failed to start inference within ` +
+            `${STARTUP_TIMEOUT_MS}ms — zombie detected. The event loop may have ` +
+            `stalled or the inference request was dropped.`
+          ));
+        }
+      }, STARTUP_TIMEOUT_MS);
 
       const traceListener = (event: TraceEvent) => {
         if (settled) return;
@@ -535,7 +580,11 @@ export class AgentFramework {
         if (agentName !== agent.name) return;
 
         switch (event.type) {
+          case 'inference:started':
+            inferenceStarted = true;
+            break;
           case 'inference:tokens': {
+            inferenceStarted = true;
             const content = (event as { content?: string }).content;
             if (content) speech += content;
             break;
@@ -855,6 +904,180 @@ export class AgentFramework {
       eventType,
     });
     return result.entries;
+  }
+
+  // ==========================================================================
+  // Undo / Redo
+  // ==========================================================================
+
+  /**
+   * Undo the last inference turn for an agent.
+   *
+   * Creates a new branch at the Chronicle sequence recorded before that turn
+   * and switches to it, atomically rolling back all state (messages, context
+   * log, inference log, MCPL checkpoints).
+   *
+   * The undone branch is saved so `redo()` can restore it.
+   * Returns the checkpoint that was undone, or null if nothing to undo.
+   */
+  undoLastTurn(agentName: string): {
+    undone: boolean;
+    turnIndex?: number;
+    fromBranch?: string;
+    toBranch?: string;
+  } {
+    const agent = this.agents.get(agentName);
+    if (!agent) {
+      throw new Error(`Unknown agent: ${agentName}`);
+    }
+    if (agent.state.status !== 'idle') {
+      throw new Error(`Cannot undo while agent is ${agent.state.status}`);
+    }
+
+    const checkpoints = this.getTurnCheckpoints(agentName);
+    if (checkpoints.length === 0) {
+      return { undone: false };
+    }
+
+    const checkpoint = checkpoints.pop()!;
+    this.saveTurnCheckpoints(agentName, checkpoints);
+
+    const currentBranch = this.store.currentBranch();
+    const undoBranchName = `undo/${agentName}/${checkpoint.turnIndex}-${Date.now()}`;
+
+    this.store.createBranchAt(undoBranchName, currentBranch.name, checkpoint.sequenceBefore);
+    this.store.switchBranch(undoBranchName);
+
+    // Push onto redo stack
+    let redoStack = this.redoStacks.get(agentName);
+    if (!redoStack) {
+      redoStack = [];
+      this.redoStacks.set(agentName, redoStack);
+    }
+    redoStack.push({ branchName: currentBranch.name, checkpoint });
+
+    this.emitTrace({
+      type: 'undo:completed',
+      agentName,
+      turnIndex: checkpoint.turnIndex,
+      fromBranch: currentBranch.name,
+      toBranch: undoBranchName,
+    });
+
+    return {
+      undone: true,
+      turnIndex: checkpoint.turnIndex,
+      fromBranch: currentBranch.name,
+      toBranch: undoBranchName,
+    };
+  }
+
+  /**
+   * Redo a previously undone turn for an agent.
+   *
+   * Switches back to the branch that was active before the last undo.
+   * Returns false if there's nothing to redo.
+   */
+  redo(agentName: string): {
+    redone: boolean;
+    fromBranch?: string;
+    toBranch?: string;
+  } {
+    const agent = this.agents.get(agentName);
+    if (!agent) {
+      throw new Error(`Unknown agent: ${agentName}`);
+    }
+    if (agent.state.status !== 'idle') {
+      throw new Error(`Cannot redo while agent is ${agent.state.status}`);
+    }
+
+    const redoStack = this.redoStacks.get(agentName);
+    if (!redoStack || redoStack.length === 0) {
+      return { redone: false };
+    }
+
+    const { branchName, checkpoint } = redoStack.pop()!;
+    const currentBranch = this.store.currentBranch();
+
+    this.store.switchBranch(branchName);
+
+    // Restore the checkpoint
+    const checkpoints = this.getTurnCheckpoints(agentName);
+    checkpoints.push(checkpoint);
+    this.saveTurnCheckpoints(agentName, checkpoints);
+
+    this.emitTrace({
+      type: 'redo:completed',
+      agentName,
+      fromBranch: currentBranch.name,
+      toBranch: branchName,
+    });
+
+    return {
+      redone: true,
+      fromBranch: currentBranch.name,
+      toBranch: branchName,
+    };
+  }
+
+  /**
+   * Check if undo/redo is available for an agent.
+   */
+  getUndoRedoState(agentName: string): {
+    canUndo: boolean;
+    canRedo: boolean;
+    undoDepth: number;
+    redoDepth: number;
+  } {
+    const checkpoints = this.getTurnCheckpoints(agentName);
+    const redoStack = this.redoStacks.get(agentName);
+    return {
+      canUndo: checkpoints.length > 0,
+      canRedo: (redoStack?.length ?? 0) > 0,
+      undoDepth: checkpoints.length,
+      redoDepth: redoStack?.length ?? 0,
+    };
+  }
+
+  // ==========================================================================
+  // Turn checkpoint internals
+  // ==========================================================================
+
+  private recordTurnCheckpoint(agentName: string): void {
+    const turnIndex = this.turnCounters.get(agentName) ?? 0;
+    this.turnCounters.set(agentName, turnIndex + 1);
+
+    const checkpoint: TurnCheckpoint = {
+      agentName,
+      turnIndex,
+      sequenceBefore: this.store.currentSequence(),
+      branchName: this.store.currentBranch().name,
+      timestamp: Date.now(),
+    };
+
+    const checkpoints = this.getTurnCheckpoints(agentName);
+    checkpoints.push(checkpoint);
+
+    // Trim to max depth
+    if (checkpoints.length > MAX_TURN_CHECKPOINTS) {
+      checkpoints.splice(0, checkpoints.length - MAX_TURN_CHECKPOINTS);
+    }
+
+    this.saveTurnCheckpoints(agentName, checkpoints);
+  }
+
+  private getTurnCheckpoints(agentName: string): TurnCheckpoint[] {
+    const data = this.store.getStateJson(TURN_CHECKPOINTS_ID);
+    if (!data || typeof data !== 'object') return [];
+    const allCheckpoints = data as Record<string, TurnCheckpoint[]>;
+    return Array.isArray(allCheckpoints[agentName]) ? [...allCheckpoints[agentName]] : [];
+  }
+
+  private saveTurnCheckpoints(agentName: string, checkpoints: TurnCheckpoint[]): void {
+    const data = this.store.getStateJson(TURN_CHECKPOINTS_ID);
+    const allCheckpoints = (data && typeof data === 'object' ? data : {}) as Record<string, TurnCheckpoint[]>;
+    allCheckpoints[agentName] = checkpoints;
+    this.store.setStateJson(TURN_CHECKPOINTS_ID, allCheckpoints);
   }
 
   /**
@@ -1199,6 +1422,8 @@ export class AgentFramework {
       return;
     }
 
+    const STALE_REQUEST_MS = 30_000;
+    const now = Date.now();
     const state = this.createFrameworkState();
 
     // Group requests by agent
@@ -1215,11 +1440,32 @@ export class AgentFramework {
     // Check each agent
     for (const [agentName, requests] of requestsByAgent) {
       const agent = this.agents.get(agentName);
-      if (!agent) continue;
+      if (!agent) {
+        // Agent not found — request is orphaned. Emit warning and drop.
+        const oldest = Math.min(...requests.map(r => r.timestamp));
+        this.emitTrace({
+          type: 'inference:request_dropped',
+          agentName,
+          reason: 'agent_not_found',
+          requestCount: requests.length,
+          oldestRequestAge: now - oldest,
+        });
+        continue;
+      }
 
       // Skip if agent is busy (inferring, streaming, or waiting for tools)
       if (agent.state.status === 'inferring' || agent.state.status === 'streaming' || agent.state.status === 'waiting_for_tools') {
-        // Re-queue requests
+        // Re-queue requests, but warn if they've been pending too long
+        const oldest = Math.min(...requests.map(r => r.timestamp));
+        if (now - oldest > STALE_REQUEST_MS) {
+          this.emitTrace({
+            type: 'inference:request_stale',
+            agentName,
+            agentStatus: agent.state.status,
+            requestCount: requests.length,
+            oldestRequestAge: now - oldest,
+          });
+        }
         this.pendingRequests.push(...requests);
         continue;
       }
@@ -1236,6 +1482,12 @@ export class AgentFramework {
   }
 
   private async startAgentStream(agent: Agent, trigger?: InferenceRequest, attempt = 0): Promise<void> {
+    // Record turn checkpoint before inference (only on first attempt, not retries)
+    if (attempt === 0) {
+      this.recordTurnCheckpoint(agent.name);
+      this.redoStacks.delete(agent.name); // new work invalidates redo
+    }
+
     this.emitTrace({ type: 'inference:started', agentName: agent.name });
 
     try {
@@ -1690,21 +1942,24 @@ export class AgentFramework {
   }
 
   private dispatchToolCall(agentName: string, call: ToolCall): void {
+    // Enrich call with caller identity so modules can resolve the calling agent
+    const enrichedCall: ToolCall = { ...call, callerAgentName: agentName };
+
     // Route MCPL tool calls to the appropriate server via prefix map
-    const mcplMatch = this.resolveMcplTool(call.name);
+    const mcplMatch = this.resolveMcplTool(enrichedCall.name);
     if (mcplMatch && this.mcplServerRegistry) {
-      this.dispatchMcplToolCall(agentName, call, mcplMatch[0], mcplMatch[1]);
+      this.dispatchMcplToolCall(agentName, enrichedCall, mcplMatch[0], mcplMatch[1]);
       return;
     }
 
     // Route synthesized channel tools
-    if (call.name.startsWith('channel_') && this.channelRegistry) {
-      this.dispatchChannelToolCall(agentName, call);
+    if (enrichedCall.name.startsWith('channel_') && this.channelRegistry) {
+      this.dispatchChannelToolCall(agentName, enrichedCall);
       return;
     }
 
-    const colonIndex = call.name.indexOf(':');
-    const moduleName = colonIndex >= 0 ? call.name.substring(0, colonIndex) : 'unknown';
+    const colonIndex = enrichedCall.name.indexOf(':');
+    const moduleName = colonIndex >= 0 ? enrichedCall.name.substring(0, colonIndex) : 'unknown';
     const toolName = colonIndex >= 0 ? call.name.substring(colonIndex + 1) : call.name;
 
     this.pushEvent({
@@ -1717,20 +1972,21 @@ export class AgentFramework {
     });
   }
 
+
   private dispatchToolCallEvent(event: ToolCallEvent): void {
     const { call, agentName, moduleName } = event;
     this.emitTrace({
       type: 'tool:started',
       module: moduleName,
-      tool: call.name,
-      callId: call.id,
-      input: call.input,
+      tool: enrichedCall.name,
+      callId: enrichedCall.id,
+      input: enrichedCall.input,
     });
 
     const startTime = Date.now();
 
     this.moduleRegistry
-      .handleToolCall(call)
+      .handleToolCall(enrichedCall)
       .then((result) => {
         const durationMs = Date.now() - startTime;
         this.emitTrace({
@@ -1936,6 +2192,11 @@ export class AgentFramework {
       try {
         const connection = await this.mcplServerRegistry.addServer(config, hostCapabilities);
 
+        // Wire event listeners then flush any events that arrived during the
+        // handshake window (between setupMessageRouting and now).
+        this.wireMcplEvents(connection);
+        connection.ready();
+
         // Initialize feature sets if server advertises MCPL capabilities
         if (connection.capabilities) {
           const updateParams = this.featureSetManager.initializeServer(
@@ -1972,9 +2233,6 @@ export class AgentFramework {
             }
           }
         }
-
-        // Wire event listeners for this connection
-        this.wireMcplEvents(connection);
 
         this.emitTrace({ type: 'module:added', moduleName: `mcpl:${config.id}` });
       } catch (error) {
