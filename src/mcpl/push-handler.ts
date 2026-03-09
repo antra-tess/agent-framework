@@ -195,6 +195,7 @@ export class PushHandler {
         serverId,
         featureSet: params.featureSet,
         eventId: params.eventId,
+        eventType: 'push:event',
         ...(params.origin ?? {}),
       };
       triggerInference = this.shouldTriggerInference(textContent, metadata);

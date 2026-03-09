@@ -1953,6 +1953,11 @@ export class AgentFramework {
       try {
         const connection = await this.mcplServerRegistry.addServer(config, hostCapabilities);
 
+        // Wire event listeners then flush any events that arrived during the
+        // handshake window (between setupMessageRouting and now).
+        this.wireMcplEvents(connection);
+        connection.ready();
+
         // Initialize feature sets if server advertises MCPL capabilities
         if (connection.capabilities) {
           const updateParams = this.featureSetManager.initializeServer(
@@ -1989,9 +1994,6 @@ export class AgentFramework {
             }
           }
         }
-
-        // Wire event listeners for this connection
-        this.wireMcplEvents(connection);
 
         this.emitTrace({ type: 'module:added', moduleName: `mcpl:${config.id}` });
       } catch (error) {

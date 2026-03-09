@@ -238,11 +238,13 @@ export class ChannelRegistry {
       registeredIds.push(channel.id);
     }
 
-    // Auto-open all registered channels
-    await this.autoOpenChannels(serverId, params.channels);
-
+    // Respond before auto-opening — the server blocks on this response and
+    // can't process channels/open until it arrives.
     const result: ChannelsRegisterResult = { registered: registeredIds };
     responder?.respond(result);
+
+    // Auto-open all registered channels
+    await this.autoOpenChannels(serverId, params.channels);
 
     this.emitTraceFn({
       type: 'mcpl:channels-register',
@@ -335,7 +337,7 @@ export class ChannelRegistry {
           .join('\n');
         triggerInference = this.shouldTriggerInference(
           textContent,
-          message.metadata ?? {},
+          { ...message.metadata, eventType: 'channel:incoming' },
         );
       }
 
@@ -557,17 +559,12 @@ export class ChannelRegistry {
   // Private: Auto-open channels
   // ==========================================================================
 
-  /**
-   * Auto-open newly registered channels by sending `channels/open` to the server.
-   */
   private async autoOpenChannels(
     serverId: string,
     channels: ChannelDescriptor[],
   ): Promise<void> {
     const server = this.serverRegistry.getServer(serverId);
-    if (!server) {
-      return;
-    }
+    if (!server) return;
 
     for (const channel of channels) {
       const key = `${serverId}:${channel.id}`;
@@ -581,7 +578,6 @@ export class ChannelRegistry {
           entry.open = true;
         }
       } catch (err) {
-        // Log but do not fail — channel may not support open
         this.emitTraceFn({
           type: 'mcpl:channel-open-failed',
           serverId,
