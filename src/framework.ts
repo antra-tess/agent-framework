@@ -47,6 +47,7 @@ import { HookOrchestrator } from './mcpl/hook-orchestrator.js';
 import { PushHandler, type McplPushEvent } from './mcpl/push-handler.js';
 import { InferenceRouter } from './mcpl/inference-router.js';
 import { ChannelRegistry } from './mcpl/channel-registry.js';
+import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
 import type { McplServerConnection } from './mcpl/server-connection.js';
 import type {
@@ -138,6 +139,12 @@ export class AgentFramework {
   private processLoggingBroadcast: boolean;
   private activeStreams: Map<string, Promise<void>> = new Map();
   private pendingAssistantBlocks: Map<string, ContentBlock[]> = new Map();
+  /** Name of the primary (non-ephemeral) agent for routing framework messages. */
+  private primaryAgentName: string | null = null;
+
+  // Messages deferred while an agent is waiting_for_tools (to preserve
+  // tool_use → tool_result adjacency required by the Anthropic API).
+  private deferredMessages: Array<{ participant: string; content: ContentBlock[]; metadata?: MessageMetadata }> = [];
 
   // Undo/redo state
   private turnCounters: Map<string, number> = new Map(); // agentName → next turnIndex
@@ -279,7 +286,7 @@ export class AgentFramework {
       const moduleNames = new Set(config.modules.map(m => m.name));
       const prefixesSeen = new Map<string, string>(); // prefix → serverId
       for (const serverConfig of config.mcplServers) {
-        const prefix = serverConfig.toolPrefix ?? `mcpl:${serverConfig.id}`;
+        const prefix = serverConfig.toolPrefix ?? `mcpl--${serverConfig.id}`;
         if (moduleNames.has(prefix)) {
           throw new Error(
             `MCPL server "${serverConfig.id}" toolPrefix "${prefix}" collides with module "${prefix}"`
@@ -1107,6 +1114,11 @@ export class AgentFramework {
     const agent = new Agent(config, contextManager, this.membrane);
     this.agents.set(config.name, agent);
 
+    // First non-ephemeral agent becomes the primary for message routing
+    if (!this.primaryAgentName) {
+      this.primaryAgentName = config.name;
+    }
+
     return agent;
   }
 
@@ -1144,46 +1156,31 @@ export class AgentFramework {
   private async handleProcessEvent(event: ProcessEvent): Promise<void> {
     const startTime = Date.now();
 
-    // Built-in: convert MCPL events to context messages.
-    // These events are protocol-level (spec Sections 9 & 14) and always
-    // represent content intended for the model's context window.
-    if (event.type === 'mcpl:channel-incoming') {
-      this.handleMcplChannelIncoming(event as unknown as {
-        type: 'mcpl:channel-incoming';
-        serverId: string;
-        channelId: string;
-        messageId: string;
-        threadId?: string;
-        author: { id: string; name: string };
-        content: ContentBlock[];
-        timestamp: string;
-        metadata?: Record<string, unknown>;
-        triggerInference?: boolean;
-      });
-    } else if (event.type === 'mcpl:push-event') {
-      this.handleMcplPushEvent(event as unknown as McplPushEvent);
-    }
-
-    // Dispatch to all modules, tracking responses with module names
-    const responses: ModuleProcessResponse[] = [];
-    for (const module of this.moduleRegistry.getAllModules()) {
-      try {
-        const processState = this.moduleRegistry.createProcessState(module.name);
-        const response = await module.onProcess(event, processState);
-        responses.push({ moduleName: module.name, response });
-      } catch (error) {
-        console.error(`Module ${module.name} error handling process event:`, error);
-      }
-    }
-
-    // Apply responses
-    for (const { moduleName, response } of responses) {
-      await this.applyProcessResponse(response, event, moduleName);
-    }
-
-    // Handle tool results specially
+    // Handle tool results FIRST — before any module dispatch or MCPL handling.
+    // This ensures the tool_use → tool_result message adjacency required by the
+    // Anthropic API.  If we let modules or MCPL handlers run first they may add
+    // messages between tool_use and tool_result, causing a 400 error.
     if (event.type === 'tool-result') {
       const agent = this.agents.get(event.agentName);
+      if (!agent) {
+        console.warn(
+          `[framework] Dropping tool-result for unknown agent '${event.agentName}' (callId=${event.callId}). ` +
+          `Agent may have been destroyed while tool was executing.`
+        );
+      } else if (agent.state.status !== 'waiting_for_tools') {
+        console.warn(
+          `[framework] Dropping tool-result for agent '${event.agentName}' — ` +
+          `expected status 'waiting_for_tools' but got '${agent.state.status}' (callId=${event.callId}). ` +
+          `Agent may have been reset/cancelled while tool was executing.`
+        );
+        this.emitTrace({
+          type: 'tool:result_dropped',
+          agentName: event.agentName,
+          callId: event.callId,
+          agentStatus: agent.state.status,
+          result: event.result,
+        });
+      }
       if (agent && agent.state.status === 'waiting_for_tools') {
         agent.provideToolResult(event.callId, event.result);
 
@@ -1209,7 +1206,7 @@ export class AgentFramework {
             } else {
               content = JSON.stringify(tc.result.data);
               if (maxChars && content.length > maxChars) {
-                content = content.slice(0, maxChars)
+                content = safeSlice(content, 0, maxChars)
                   + '\n\n[truncated — original was ' + content.length + ' chars]';
               }
             }
@@ -1221,6 +1218,19 @@ export class AgentFramework {
             };
           });
           agent.getContextManager().addMessage('user', toolResultContent);
+
+          // Flush any messages that were deferred while waiting for tool results.
+          // Route to the PRIMARY agent — deferred messages are framework-level
+          // (e.g. subagent return notifications) meant for the main conversation.
+          if (this.deferredMessages.length > 0) {
+            const deferred = this.deferredMessages.splice(0);
+            const primary = this.primaryAgentName
+              ? this.agents.get(this.primaryAgentName)
+              : agent;
+            for (const msg of deferred) {
+              (primary ?? agent).getContextManager().addMessage(msg.participant, msg.content, msg.metadata);
+            }
+          }
 
           // Check if any tool result requested endTurn
           const shouldEndTurn = currentState.toolResults.some(tc => tc.result.endTurn);
@@ -1272,6 +1282,43 @@ export class AgentFramework {
           }
         }
       }
+    }
+
+    // Built-in: convert MCPL events to context messages.
+    // These events are protocol-level (spec Sections 9 & 14) and always
+    // represent content intended for the model's context window.
+    if (event.type === 'mcpl:channel-incoming') {
+      this.handleMcplChannelIncoming(event as unknown as {
+        type: 'mcpl:channel-incoming';
+        serverId: string;
+        channelId: string;
+        messageId: string;
+        threadId?: string;
+        author: { id: string; name: string };
+        content: ContentBlock[];
+        timestamp: string;
+        metadata?: Record<string, unknown>;
+        triggerInference?: boolean;
+      });
+    } else if (event.type === 'mcpl:push-event') {
+      this.handleMcplPushEvent(event as unknown as McplPushEvent);
+    }
+
+    // Dispatch to all modules, tracking responses with module names
+    const responses: ModuleProcessResponse[] = [];
+    for (const module of this.moduleRegistry.getAllModules()) {
+      try {
+        const processState = this.moduleRegistry.createProcessState(module.name);
+        const response = await module.onProcess(event, processState);
+        responses.push({ moduleName: module.name, response });
+      } catch (error) {
+        console.error(`Module ${module.name} error handling process event:`, error);
+      }
+    }
+
+    // Apply responses
+    for (const { moduleName, response } of responses) {
+      await this.applyProcessResponse(response, event, moduleName);
     }
 
     // Handle tool calls specially
@@ -1491,7 +1538,8 @@ export class AgentFramework {
     this.emitTrace({ type: 'inference:started', agentName: agent.name });
 
     try {
-      const tools = this.getAllTools().filter((t) => agent.canUseTool(t.name));
+      const allTools = this.getAllTools();
+      const tools = allTools.filter((t) => agent.canUseTool(t.name));
 
       // Gather context from modules (pull-based) and MCPL hooks (push-based)
       // Both produce ContextInjection[] that get merged before inference.
@@ -1592,10 +1640,86 @@ export class AgentFramework {
             }
             this.pendingAssistantBlocks.set(agent.name, assistantBlocks);
 
-            agent.enterWaitingForTools(event.calls, stream);
-            // Dispatch each tool call (async, results come back via ToolResultEvent)
+            // Detect incomplete tool calls (empty input from max_tokens truncation).
+            // These happen when the LLM hits max_tokens mid-tool-call, yielding a
+            // tool_use with {} input.  The stream won't block for tool results in
+            // this case — it immediately yields 'complete' with stop_reason='max_tokens'.
+            // If we dispatch these, the tool-result comes back after the agent has
+            // already been reset by the 'complete' handler, causing orphaned tool_use.
+            const completeCalls: ToolCall[] = [];
+            const incompleteCalls: ToolCall[] = [];
             for (const call of event.calls) {
+              const input = call.input as Record<string, unknown> | undefined;
+              if (!input || Object.keys(input).length === 0) {
+                incompleteCalls.push(call);
+              } else {
+                completeCalls.push(call);
+              }
+            }
+
+            agent.enterWaitingForTools(event.calls, stream);
+
+            // For incomplete tool calls, immediately provide synthetic error results
+            // so the agent transitions correctly without waiting for async dispatch.
+            for (const call of incompleteCalls) {
+              console.warn(
+                `[framework] Tool call '${call.name}' (${call.id}) has empty input — ` +
+                `likely max_tokens truncation. Injecting synthetic error result.`
+              );
+              this.emitTrace({
+                type: 'tool:failed',
+                module: call.name.split('--')[0] ?? 'unknown',
+                tool: call.name,
+                callId: call.id,
+                error: 'Tool call had empty input (likely truncated by max_tokens). Retry with shorter output or split into smaller steps.',
+              });
+              agent.provideToolResult(call.id, {
+                success: false,
+                error: 'Tool call had empty input (likely truncated by max_tokens). ' +
+                  'Your output was too long and got cut off before the tool input could be generated. ' +
+                  'Please retry with shorter output, or break the task into smaller steps.',
+                isError: true,
+              });
+            }
+
+            // Dispatch complete tool calls normally (async, results come back via ToolResultEvent)
+            for (const call of completeCalls) {
               this.dispatchToolCall(agent.name, call);
+            }
+
+            // If ALL calls were incomplete, agent may have transitioned to 'ready'
+            // already.  Flush pending blocks and store tool results now.
+            const postState = agent.state as AgentState;
+            if (postState.status === 'ready') {
+              // Flush pending assistant blocks
+              const pending = this.pendingAssistantBlocks.get(agent.name);
+              if (pending) {
+                agent.addAssistantResponse(pending);
+                this.pendingAssistantBlocks.delete(agent.name);
+              }
+              // Store synthetic tool results as user message
+              const maxChars = this.getMaxToolResultChars(agent);
+              const toolResultContent: ContentBlock[] = postState.toolResults.map(tc => {
+                const content = tc.result.isError
+                  ? (tc.result.error ?? 'Unknown error')
+                  : JSON.stringify(tc.result.data);
+                return {
+                  type: 'tool_result' as const,
+                  toolUseId: tc.id,
+                  content,
+                  isError: tc.result.isError,
+                };
+              });
+              agent.getContextManager().addMessage('user', toolResultContent);
+
+              // Resume stream so it can continue to the 'complete' event
+              if (postState.stream) {
+                const membraneResults = postState.toolResults.map(tc =>
+                  this.toMembraneToolResult(tc.id, tc.result, maxChars)
+                );
+                postState.stream.provideToolResults(membraneResults);
+                agent.setStreaming(postState.stream);
+              }
             }
             // Stream's async iterator blocks on next() until provideToolResults() is called
             break;
@@ -1604,6 +1728,41 @@ export class AgentFramework {
           case 'complete': {
             const durationMs = Date.now() - startTime;
             const response = event.response;
+
+            // If the agent is still waiting_for_tools when 'complete' fires
+            // (shouldn't happen after incomplete-tool-call fix, but guard anyway),
+            // flush pending blocks + inject error results for any remaining pending tools.
+            if (agent.state.status === 'waiting_for_tools') {
+              console.warn(
+                `[framework] 'complete' event fired while agent '${agent.name}' is still waiting_for_tools. ` +
+                `Injecting error results for ${agent.getPendingToolIds().length} pending tool(s).`
+              );
+              // Inject error results for all remaining pending tools
+              for (const pendingId of agent.getPendingToolIds()) {
+                agent.provideToolResult(pendingId, {
+                  success: false,
+                  error: 'Stream completed before tool result was received (likely max_tokens truncation).',
+                  isError: true,
+                });
+              }
+              // Flush pending assistant blocks
+              const pending = this.pendingAssistantBlocks.get(agent.name);
+              if (pending) {
+                agent.addAssistantResponse(pending);
+                this.pendingAssistantBlocks.delete(agent.name);
+              }
+              // Store tool results
+              const readyState = agent.state as AgentState;
+              if (readyState.status === 'ready') {
+                const toolResultContent: ContentBlock[] = readyState.toolResults.map(tc => ({
+                  type: 'tool_result' as const,
+                  toolUseId: tc.id,
+                  content: tc.result.isError ? (tc.result.error ?? 'Unknown error') : JSON.stringify(tc.result.data),
+                  isError: tc.result.isError,
+                }));
+                agent.getContextManager().addMessage('user', toolResultContent);
+              }
+            }
 
             // Add assistant response to context.
             // If we had tool calls, the tool_use blocks were already stored as
@@ -1802,6 +1961,14 @@ export class AgentFramework {
     } finally {
       this.activeStreams.delete(agent.name);
       this.pendingAssistantBlocks.delete(agent.name);
+
+      // Flush any deferred messages (e.g. if stream failed while tools were pending)
+      if (this.deferredMessages.length > 0 && this.pendingAssistantBlocks.size === 0) {
+        const deferred = this.deferredMessages.splice(0);
+        for (const msg of deferred) {
+          this.addMessage(msg.participant, msg.content, msg.metadata);
+        }
+      }
     }
   }
 
@@ -1814,11 +1981,11 @@ export class AgentFramework {
     // MCPL tools are dispatched via the MCPL subsystem
     if (this.mcplServerRegistry) {
       // Check if this is an MCPL-prefixed tool
-      const prefix = call.name.split(':').slice(0, -1).join(':');
+      const prefix = call.name.split('--').slice(0, -1).join('--');
       const serverConfigs = this.mcplServerConfigs;
       for (const [, config] of serverConfigs) {
-        const toolPrefix = config.toolPrefix ?? `mcpl:${config.id}`;
-        if (call.name.startsWith(toolPrefix + ':')) {
+        const toolPrefix = config.toolPrefix ?? `mcpl--${config.id}`;
+        if (call.name.startsWith(toolPrefix + '--')) {
           return this.executeMcplToolCall(call, config);
         }
       }
@@ -1836,8 +2003,8 @@ export class AgentFramework {
     if (!server) {
       return { success: false, error: `MCPL server ${config.id} not found`, isError: true };
     }
-    const prefix = config.toolPrefix ?? `mcpl:${config.id}`;
-    const toolName = call.name.slice(prefix.length + 1); // Strip prefix + ':'
+    const prefix = config.toolPrefix ?? `mcpl--${config.id}`;
+    const toolName = call.name.slice(prefix.length + 2); // Strip prefix + '--'
     try {
       const result = await server.sendToolsCall(toolName, call.input as Record<string, unknown>);
       return {
@@ -1860,7 +2027,7 @@ export class AgentFramework {
     } else {
       content = JSON.stringify(afResult.data);
       if (maxChars && content.length > maxChars) {
-        content = content.slice(0, maxChars)
+        content = safeSlice(content, 0, maxChars)
           + '\n\n[truncated — original was ' + content.length + ' chars]';
       }
     }
@@ -1934,7 +2101,7 @@ export class AgentFramework {
    */
   private resolveMcplTool(toolName: string): [string, string] | null {
     for (const [prefix, serverId] of this.mcplPrefixMap) {
-      if (toolName.startsWith(prefix + ':')) {
+      if (toolName.startsWith(prefix + '--')) {
         return [serverId, prefix];
       }
     }
@@ -1958,9 +2125,9 @@ export class AgentFramework {
       return;
     }
 
-    const colonIndex = enrichedCall.name.indexOf(':');
-    const moduleName = colonIndex >= 0 ? enrichedCall.name.substring(0, colonIndex) : 'unknown';
-    const toolName = colonIndex >= 0 ? call.name.substring(colonIndex + 1) : call.name;
+    const sepIndex = enrichedCall.name.indexOf('--');
+    const moduleName = sepIndex >= 0 ? enrichedCall.name.substring(0, sepIndex) : 'unknown';
+    const toolName = sepIndex >= 0 ? call.name.substring(sepIndex + 2) : call.name;
 
     this.pushEvent({
       type: 'tool-call',
@@ -2035,16 +2202,29 @@ export class AgentFramework {
     content: ContentBlock[],
     metadata?: MessageMetadata
   ): MessageId {
-    // Add to first agent's context manager (they all share the same message store)
-    const agent = this.agents.values().next().value;
+    // Route to the primary agent's context manager (not ephemeral subagents).
+    const agent = this.primaryAgentName
+      ? this.agents.get(this.primaryAgentName)
+      : this.agents.values().next().value;
     if (!agent) {
       throw new Error('No agents configured');
     }
+
+    // If any agent has pending assistant blocks (tool_use not yet flushed),
+    // defer non-tool_result messages to preserve tool_use → tool_result adjacency.
+    const hasToolResult = content.some(b => b.type === 'tool_result');
+    if (!hasToolResult && this.pendingAssistantBlocks.size > 0) {
+      this.deferredMessages.push({ participant, content, metadata });
+      return '' as MessageId; // Deferred — will be added after tool_result flush
+    }
+
     return agent.getContextManager().addMessage(participant, content, metadata);
   }
 
   private editMessage(id: MessageId, content: ContentBlock[]): void {
-    const agent = this.agents.values().next().value;
+    const agent = this.primaryAgentName
+      ? this.agents.get(this.primaryAgentName)
+      : this.agents.values().next().value;
     if (!agent) {
       throw new Error('No agents configured');
     }
@@ -2052,7 +2232,9 @@ export class AgentFramework {
   }
 
   private removeMessage(id: MessageId): void {
-    const agent = this.agents.values().next().value;
+    const agent = this.primaryAgentName
+      ? this.agents.get(this.primaryAgentName)
+      : this.agents.values().next().value;
     if (!agent) {
       throw new Error('No agents configured');
     }
@@ -2060,7 +2242,9 @@ export class AgentFramework {
   }
 
   private getMessage(id: MessageId): StoredMessage | null {
-    const agent = this.agents.values().next().value;
+    const agent = this.primaryAgentName
+      ? this.agents.get(this.primaryAgentName)
+      : this.agents.values().next().value;
     if (!agent) {
       return null;
     }
@@ -2068,7 +2252,9 @@ export class AgentFramework {
   }
 
   private queryMessages(filter: MessageQuery): MessageQueryResult {
-    const agent = this.agents.values().next().value;
+    const agent = this.primaryAgentName
+      ? this.agents.get(this.primaryAgentName)
+      : this.agents.values().next().value;
     if (!agent) {
       return { messages: [], totalCount: 0 };
     }
@@ -2125,7 +2311,7 @@ export class AgentFramework {
 
     // Build prefix map and store configs for tool routing
     for (const config of serverConfigs) {
-      const prefix = config.toolPrefix ?? `mcpl:${config.id}`;
+      const prefix = config.toolPrefix ?? `mcpl--${config.id}`;
       this.mcplPrefixMap.set(prefix, config.id);
       this.mcplServerConfigs.set(config.id, config);
     }
@@ -2335,7 +2521,7 @@ export class AgentFramework {
 
   /**
    * Discover tools from all connected MCPL servers and cache them.
-   * Tools are namespaced as `{toolPrefix}:{toolName}` per server config.
+   * Tools are namespaced as `{toolPrefix}--{toolName}` per server config.
    */
   private async refreshMcplTools(): Promise<void> {
     if (!this.mcplServerRegistry) return;
@@ -2344,14 +2530,14 @@ export class AgentFramework {
 
     for (const server of this.mcplServerRegistry.getAllServers()) {
       const config = this.mcplServerConfigs.get(server.id);
-      const prefix = config?.toolPrefix ?? `mcpl:${server.id}`;
+      const prefix = config?.toolPrefix ?? `mcpl--${server.id}`;
       try {
         const result = await server.sendToolsList();
         for (const tool of result.tools) {
           // MCP tool schemas are generic JSON Schema; cast to membrane's ToolDefinition format
           const schema = tool.inputSchema as import('./types/index.js').ToolDefinition['inputSchema'];
           tools.push({
-            name: `${prefix}:${tool.name}`,
+            name: `${prefix}--${tool.name}`,
             description: tool.description ?? '',
             inputSchema: schema,
           });
@@ -2423,7 +2609,7 @@ export class AgentFramework {
    * Strips the configured toolPrefix and routes to the server.
    */
   private dispatchMcplToolCall(agentName: string, call: ToolCall, serverId: string, prefix: string): void {
-    const toolName = call.name.slice(prefix.length + 1); // strip "{prefix}:"
+    const toolName = call.name.slice(prefix.length + 2); // strip "{prefix}--"
     const server = this.mcplServerRegistry!.getServer(serverId);
 
     if (!server) {

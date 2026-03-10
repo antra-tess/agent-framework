@@ -436,6 +436,13 @@ export class FilesModule implements Module {
   // ==========================================================================
 
   private async handleRead(input: ReadInput): Promise<ToolResult> {
+    if (!input.filePath) {
+      return {
+        success: false,
+        error: 'Missing required parameter "filePath". Provide the path of the file to read.',
+        isError: true,
+      };
+    }
     const content = this.readFile(input.filePath);
     if (content === null) {
       return { success: false, error: `File not found: ${input.filePath}`, isError: true };
@@ -466,7 +473,36 @@ export class FilesModule implements Module {
   }
 
   private async handleWrite(input: WriteInput): Promise<ToolResult> {
-    this.writeFile(input.filePath, input.content);
+    // Validate required parameters — the LLM may generate incomplete tool calls
+    // (e.g. empty {} input from max_tokens cutoff)
+    if (!input.filePath) {
+      return {
+        success: false,
+        error: 'Missing required parameter "filePath". Provide the path for the file to write.',
+        isError: true,
+      };
+    }
+    if (input.content === undefined || input.content === null) {
+      return {
+        success: false,
+        error: 'Missing required parameter "content". Provide the content to write to the file.',
+        isError: true,
+      };
+    }
+
+    try {
+      this.writeFile(input.filePath, input.content);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('State already exists')) {
+        return {
+          success: false,
+          error: `File with key '${input.filePath}' already exists. Use a different key, or use files--edit to modify existing files.`,
+          isError: true,
+        };
+      }
+      throw error;
+    }
     return {
       success: true,
       data: { path: input.filePath, size: input.content.length },
@@ -474,6 +510,15 @@ export class FilesModule implements Module {
   }
 
   private async handleEdit(input: EditInput): Promise<ToolResult> {
+    if (!input.filePath) {
+      return { success: false, error: 'Missing required parameter "filePath".', isError: true };
+    }
+    if (input.oldString === undefined || input.oldString === null) {
+      return { success: false, error: 'Missing required parameter "oldString".', isError: true };
+    }
+    if (input.newString === undefined || input.newString === null) {
+      return { success: false, error: 'Missing required parameter "newString".', isError: true };
+    }
     this.editFile(input.filePath, input.oldString, input.newString, input.replaceAll);
     return {
       success: true,

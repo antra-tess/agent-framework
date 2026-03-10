@@ -116,6 +116,13 @@ export type TraceEvent =
       error: string;
       stack?: string;
     })
+  | (TraceEventBase & {
+      type: 'tool:result_dropped';
+      agentName: string;
+      callId: string;
+      agentStatus: string;
+      result: unknown;
+    })
 
   // Module lifecycle
   | (TraceEventBase & { type: 'module:added'; moduleName: string })

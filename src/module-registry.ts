@@ -195,7 +195,7 @@ export class ModuleRegistry {
       for (const tool of module.getTools()) {
         tools.push({
           ...tool,
-          name: `${module.name}:${tool.name}`,
+          name: `${module.name}--${tool.name}`,
         });
       }
     }
@@ -206,9 +206,9 @@ export class ModuleRegistry {
    * Handle a tool call by routing to the appropriate module.
    */
   async handleToolCall(call: ToolCall): Promise<ToolResult> {
-    // Parse module:tool name
-    const colonIndex = call.name.indexOf(':');
-    if (colonIndex === -1) {
+    // Parse module--tool name
+    const sepIndex = call.name.indexOf('--');
+    if (sepIndex === -1) {
       return {
         success: false,
         error: `Invalid tool name format: ${call.name}`,
@@ -216,8 +216,8 @@ export class ModuleRegistry {
       };
     }
 
-    const moduleName = call.name.substring(0, colonIndex);
-    const toolName = call.name.substring(colonIndex + 1);
+    const moduleName = call.name.substring(0, sepIndex);
+    const toolName = call.name.substring(sepIndex + 2);
 
     const module = this.modules.get(moduleName);
     if (!module) {

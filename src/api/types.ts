@@ -365,6 +365,7 @@ export type ApiEventType =
   | 'tool:started'
   | 'tool:completed'
   | 'tool:failed'
+  | 'tool:result_dropped'
   | 'module:added'
   | 'module:removed'
   | 'message:added'

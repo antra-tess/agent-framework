@@ -292,7 +292,17 @@ export class Agent {
     this._inferenceStartedAt = Date.now();
     this.lastStreamInputTokens = 0;
 
-    const { messages, systemInjections } = await this.compileWithInjections(budget, injections);
+    let { messages, systemInjections } = await this.compileWithInjections(budget, injections);
+
+    // Safety: ensure messages don't end with an assistant message.
+    // Some models reject trailing assistant messages ("prefill not supported"),
+    // and after context compression a stale assistant turn can end up last.
+    if (messages.length > 0 && messages[messages.length - 1]!.participant === this.name) {
+      messages = [...messages, {
+        participant: 'user',
+        content: [{ type: 'text', text: '[Continue]' }],
+      }];
+    }
 
     const request: NormalizedRequest = {
       messages,
