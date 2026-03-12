@@ -181,13 +181,29 @@ export interface McplServerConfig {
   /** Unique server identifier */
   id: string;
 
-  /** Command to spawn the server process (stdio transport) */
-  command: string;
+  /**
+   * Command to spawn the server process (stdio transport).
+   * Mutually exclusive with `url`. One of `command` or `url` must be provided.
+   */
+  command?: string;
 
-  /** Arguments for the command */
+  /**
+   * WebSocket URL for remote MCPL servers (e.g., "wss://example.com/mcpl").
+   * When present, connects via WebSocket instead of spawning a child process.
+   * Mutually exclusive with `command`. One of `command` or `url` must be provided.
+   */
+  url?: string;
+
+  /**
+   * Authentication token for WebSocket connections.
+   * Sent as a query parameter: `wss://example.com/mcpl?token=<token>`.
+   */
+  token?: string;
+
+  /** Arguments for the command (stdio only) */
   args?: string[];
 
-  /** Environment variables for the child process */
+  /** Environment variables for the child process (stdio only) */
   env?: Record<string, string>;
 
   /** Feature sets to enable on connect */

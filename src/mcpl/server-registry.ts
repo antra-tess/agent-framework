@@ -40,9 +40,23 @@ export class McplServerRegistry {
       throw new Error(`MCPL server "${config.id}" is already registered`);
     }
 
-    const connection = config.reconnect
-      ? await McplServerConnection.connectWithReconnect(config, hostCapabilities)
-      : await McplServerConnection.connect(config, hostCapabilities);
+    // Validate config: exactly one of command or url must be present
+    if (!config.command && !config.url) {
+      throw new Error(`MCPL server "${config.id}": either "command" (stdio) or "url" (WebSocket) must be provided`);
+    }
+    if (config.command && config.url) {
+      throw new Error(`MCPL server "${config.id}": "command" and "url" are mutually exclusive`);
+    }
+
+    // Route to the appropriate transport
+    let connection: McplServerConnection;
+    if (config.reconnect) {
+      connection = await McplServerConnection.connectWithReconnect(config, hostCapabilities);
+    } else if (config.url) {
+      connection = await McplServerConnection.connectWebSocket(config, hostCapabilities);
+    } else {
+      connection = await McplServerConnection.connect(config, hostCapabilities);
+    }
     this.servers.set(config.id, connection);
 
     // Auto-remove on unexpected close (unless reconnect will re-add)

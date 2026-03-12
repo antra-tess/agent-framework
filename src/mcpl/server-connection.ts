@@ -1,14 +1,18 @@
 /**
  * McplServerConnection — manages a single JSON-RPC 2.0 connection to an MCPL server.
  *
- * Spawns a child process (stdio transport), performs the MCP initialize handshake
- * with MCPL capability negotiation, and provides typed methods for all outbound
- * MCPL messages plus EventEmitter events for inbound messages.
+ * Supports two transports:
+ * - **stdio**: Spawns a child process, communicates via newline-delimited JSON on stdin/stdout
+ * - **WebSocket**: Connects to a remote server via WebSocket, one JSON-RPC message per frame
+ *
+ * Both transports perform the MCP initialize handshake with MCPL capability negotiation,
+ * and provide the same typed methods for outbound messages and EventEmitter events for inbound.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
+import WebSocket from 'ws';
 
 import type {
   McplServerConfig,
@@ -43,6 +47,9 @@ import { McplMethod } from './types.js';
  *  Spring Boot + JDA servers can take 5-10s to boot, so 30s is safe. */
 const INITIALIZE_TIMEOUT_MS = 30_000;
 
+/** WebSocket ping interval in milliseconds (Proposal 001: 30s). */
+const WS_PING_INTERVAL_MS = 30_000;
+
 /** MCP protocol version used in the initialize handshake. */
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 
@@ -56,9 +63,28 @@ interface PendingRequest {
 }
 
 /**
+ * Transport abstraction — decouples message framing from protocol logic.
+ * stdio: newline-delimited JSON on stdin/stdout
+ * WebSocket: one JSON-RPC message per text frame
+ */
+interface Transport {
+  /** Send a JSON string to the server. */
+  write(json: string): void;
+  /** Register a callback for each incoming message (already parsed line/frame). */
+  onMessage(cb: (line: string) => void): void;
+  /** Register a callback for transport-level errors. */
+  onError(cb: (err: Error) => void): void;
+  /** Register a callback for transport close. */
+  onClose(cb: (code?: number, signal?: string) => void): void;
+  /** Shut down the transport. Returns when fully closed. */
+  close(): Promise<void>;
+}
+
+/**
  * McplServerConnection manages a single JSON-RPC 2.0 connection to an
- * MCPL server over stdio. Use the static `connect()` factory to create
- * and initialize a connection.
+ * MCPL server. Supports stdio and WebSocket transports.
+ * Use `connect()` for stdio, `connectWebSocket()` for WebSocket,
+ * or `connectWithReconnect()` which auto-selects based on config.
  *
  * Events emitted:
  * - `'push-event'`        — Server sent `push/event`
@@ -85,8 +111,7 @@ export class McplServerConnection extends EventEmitter {
   /** MCPL capabilities negotiated during the initialize handshake, or null if the server does not support MCPL. */
   capabilities: McplCapabilities | null;
 
-  private process: ChildProcess;
-  private readline: ReadlineInterface;
+  private transport: Transport | null;
   private nextRequestId = 1;
   private pendingRequests = new Map<string | number, PendingRequest>();
   private closed = false;
@@ -103,22 +128,20 @@ export class McplServerConnection extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * Private constructor. Use `McplServerConnection.connect()` instead.
+   * Private constructor. Use `McplServerConnection.connect()` or `connectWebSocket()` instead.
    */
   private constructor(
     id: string,
     capabilities: McplCapabilities | null,
-    childProcess: ChildProcess,
-    readline: ReadlineInterface,
+    transport: Transport | null,
   ) {
     super();
     this.id = id;
     this.capabilities = capabilities;
-    this.process = childProcess;
-    this.readline = readline;
+    this.transport = transport;
 
-    // Skip setup for disconnected stubs (process/readline are null)
-    if (childProcess && readline) {
+    // Skip setup for disconnected stubs (transport is null)
+    if (transport) {
       this.setupMessageRouting();
       this.setupLifecycle();
     }
@@ -159,8 +182,8 @@ export class McplServerConnection extends EventEmitter {
   // ==========================================================================
 
   /**
-   * Spawn a server process, perform the MCP initialize handshake with MCPL
-   * capability negotiation, and return a ready-to-use connection.
+   * Spawn a server process (stdio transport), perform the MCP initialize
+   * handshake with MCPL capability negotiation, and return a ready-to-use connection.
    *
    * Throws if the process cannot be spawned or the handshake times out.
    */
@@ -168,6 +191,10 @@ export class McplServerConnection extends EventEmitter {
     config: McplServerConfig,
     hostCapabilities: McplHostCapabilities,
   ): Promise<McplServerConnection> {
+    if (!config.command) {
+      throw new Error(`MCPL server "${config.id}": stdio transport requires "command" in config`);
+    }
+
     const child = spawn(config.command, config.args ?? [], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...config.env },
@@ -186,12 +213,150 @@ export class McplServerConnection extends EventEmitter {
     // Set up readline for newline-delimited JSON on stdout
     const rl = createInterface({ input: child.stdout! });
 
+    // Build the stdio transport
+    const transport: Transport = {
+      write(json: string) { child.stdin!.write(json + '\n'); },
+      onMessage(cb) { rl.on('line', cb); },
+      onError(cb) { child.on('error', (err) => cb(err)); },
+      onClose(cb) {
+        child.on('exit', (code, signal) => cb(code ?? undefined, signal ?? undefined));
+      },
+      async close() {
+        rl.close();
+        if (!child.killed) child.kill();
+        await new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.killed) resolve();
+          else child.once('exit', () => resolve());
+        });
+      },
+    };
+
     // -----------------------------------------------------------------------
     // Perform initialize handshake
     // -----------------------------------------------------------------------
 
+    const mcplCaps = await McplServerConnection.performHandshake(
+      config.id, transport, hostCapabilities, earlyExitPromise,
+    );
+
+    // Remove the early-exit listener so normal close handling takes over
+    child.removeAllListeners('exit');
+    child.removeAllListeners('error');
+
+    const connection = new McplServerConnection(config.id, mcplCaps, transport);
+
+    // Store config for reconnection
+    if (config.reconnect) {
+      connection.config = config;
+      connection.hostCapabilities = hostCapabilities;
+      connection.reconnectEnabled = true;
+      connection.reconnectIntervalMs = config.reconnectIntervalMs ?? 5000;
+    }
+
+    return connection;
+  }
+
+  /**
+   * Connect to a remote MCPL server via WebSocket, perform the MCP initialize
+   * handshake with MCPL capability negotiation, and return a ready-to-use connection.
+   *
+   * Throws if the WebSocket connection fails or the handshake times out.
+   */
+  static async connectWebSocket(
+    config: McplServerConfig,
+    hostCapabilities: McplHostCapabilities,
+  ): Promise<McplServerConnection> {
+    if (!config.url) {
+      throw new Error(`MCPL server "${config.id}": WebSocket transport requires "url" in config`);
+    }
+
+    // Append token as query parameter if provided
+    let wsUrl = config.url;
+    if (config.token) {
+      const separator = wsUrl.includes('?') ? '&' : '?';
+      wsUrl = `${wsUrl}${separator}token=${encodeURIComponent(config.token)}`;
+    }
+
+    const ws = await new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(wsUrl);
+      socket.once('open', () => {
+        socket.removeListener('error', reject);
+        resolve(socket);
+      });
+      socket.once('error', (err) => {
+        reject(new Error(`Failed to connect to MCPL server "${config.id}" at ${config.url}: ${err.message}`));
+      });
+    });
+
+    // Heartbeat: ping every 30s, close if no pong within 60s
+    let pongReceived = true;
+    const pingInterval = setInterval(() => {
+      if (!pongReceived) {
+        ws.terminate();
+        return;
+      }
+      pongReceived = false;
+      ws.ping();
+    }, WS_PING_INTERVAL_MS);
+
+    ws.on('pong', () => { pongReceived = true; });
+
+    // Build the WebSocket transport
+    const transport: Transport = {
+      write(json: string) { ws.send(json); },
+      onMessage(cb) { ws.on('message', (data: WebSocket.RawData) => cb(data.toString())); },
+      onError(cb) { ws.on('error', (err: Error) => cb(err)); },
+      onClose(cb) { ws.on('close', (code: number) => cb(code)); },
+      async close() {
+        clearInterval(pingInterval);
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+          await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+        }
+      },
+    };
+
+    // Fail fast if the WebSocket closes during handshake
+    const earlyClosePromise = new Promise<never>((_resolve, reject) => {
+      ws.once('close', (code) => {
+        reject(new Error(`MCPL server "${config.id}" WebSocket closed before handshake (code ${code})`));
+      });
+    });
+
+    const mcplCaps = await McplServerConnection.performHandshake(
+      config.id, transport, hostCapabilities, earlyClosePromise,
+    );
+
+    // Remove the early-close listener so normal close handling takes over
+    ws.removeAllListeners('close');
+    // Re-attach the transport's onClose since we just removed it
+    transport.onClose = (cb) => { ws.on('close', (code) => cb(code)); };
+
+    const connection = new McplServerConnection(config.id, mcplCaps, transport);
+
+    // Store config for reconnection
+    if (config.reconnect) {
+      connection.config = config;
+      connection.hostCapabilities = hostCapabilities;
+      connection.reconnectEnabled = true;
+      connection.reconnectIntervalMs = config.reconnectIntervalMs ?? 5000;
+    }
+
+    return connection;
+  }
+
+  /**
+   * Perform the MCP initialize handshake over a transport.
+   * Shared by both stdio and WebSocket factories.
+   */
+  private static async performHandshake(
+    serverId: string,
+    transport: Transport,
+    hostCapabilities: McplHostCapabilities,
+    earlyFailPromise: Promise<never>,
+  ): Promise<McplCapabilities | null> {
     // Step 1: Send `initialize` request
-    const initId = 0; // use id=0 for the handshake
+    const initId = 0;
     const initRequest: JsonRpcRequest = {
       jsonrpc: '2.0',
       method: 'initialize',
@@ -209,18 +374,19 @@ export class McplServerConnection extends EventEmitter {
         },
       },
     };
-    child.stdin!.write(JSON.stringify(initRequest) + '\n');
+    transport.write(JSON.stringify(initRequest));
 
     // Step 2: Wait for the initialize response
     const initResponse = await Promise.race([
       new Promise<JsonRpcResponse>((resolve, reject) => {
-        const onLine = (line: string) => {
+        const onMessage = (line: string) => {
           try {
             const msg = JSON.parse(line) as JsonRpcResponse;
             if (msg.id === initId) {
-              rl.off('line', onLine);
+              // Can't remove listener from transport interface, but the handler
+              // becomes a no-op after first match since we resolve/reject once
               if (msg.error) {
-                reject(new Error(`MCPL server "${config.id}" initialize error: ${msg.error.message}`));
+                reject(new Error(`MCPL server "${serverId}" initialize error: ${msg.error.message}`));
               } else {
                 resolve(msg);
               }
@@ -229,12 +395,12 @@ export class McplServerConnection extends EventEmitter {
             // Ignore non-JSON lines (e.g. logback output from Java servers)
           }
         };
-        rl.on('line', onLine);
+        transport.onMessage(onMessage);
       }),
-      earlyExitPromise,
+      earlyFailPromise,
       new Promise<never>((_resolve, reject) =>
         setTimeout(() => {
-          reject(new Error(`MCPL server "${config.id}" initialize handshake timed out`));
+          reject(new Error(`MCPL server "${serverId}" initialize handshake timed out`));
         }, INITIALIZE_TIMEOUT_MS),
       ),
     ]);
@@ -245,28 +411,27 @@ export class McplServerConnection extends EventEmitter {
     const experimental = caps?.experimental as Record<string, unknown> | undefined;
     const mcplCaps = (experimental?.mcpl as McplCapabilities) ?? null;
 
-    // Step 3: Send `initialized` notification (no id)
+    // Step 3: Send `initialized` notification
     const initializedNotification: JsonRpcRequest = {
       jsonrpc: '2.0',
       method: 'notifications/initialized',
     };
-    child.stdin!.write(JSON.stringify(initializedNotification) + '\n');
+    transport.write(JSON.stringify(initializedNotification));
 
-    // Remove the early-exit listener so normal close handling takes over
-    child.removeAllListeners('exit');
-    child.removeAllListeners('error');
+    return mcplCaps;
+  }
 
-    const connection = new McplServerConnection(config.id, mcplCaps, child, rl);
-
-    // Store config for reconnection
-    if (config.reconnect) {
-      connection.config = config;
-      connection.hostCapabilities = hostCapabilities;
-      connection.reconnectEnabled = true;
-      connection.reconnectIntervalMs = config.reconnectIntervalMs ?? 5000;
+  /**
+   * Connect with the appropriate transport based on config (stdio or WebSocket).
+   */
+  private static connectAuto(
+    config: McplServerConfig,
+    hostCapabilities: McplHostCapabilities,
+  ): Promise<McplServerConnection> {
+    if (config.url) {
+      return McplServerConnection.connectWebSocket(config, hostCapabilities);
     }
-
-    return connection;
+    return McplServerConnection.connect(config, hostCapabilities);
   }
 
   /**
@@ -280,7 +445,7 @@ export class McplServerConnection extends EventEmitter {
     hostCapabilities: McplHostCapabilities,
   ): Promise<McplServerConnection> {
     try {
-      return await McplServerConnection.connect(config, hostCapabilities);
+      return await McplServerConnection.connectAuto(config, hostCapabilities);
     } catch (error) {
       if (!config.reconnect) {
         throw error;
@@ -301,8 +466,7 @@ export class McplServerConnection extends EventEmitter {
     config: McplServerConfig,
     hostCapabilities: McplHostCapabilities,
   ): McplServerConnection {
-    // Use null! for process/readline since the connection is closed
-    const stub = new McplServerConnection(config.id, null, null! as ChildProcess, null! as ReadlineInterface);
+    const stub = new McplServerConnection(config.id, null, null);
     stub.closed = true;
     stub.config = config;
     stub.hostCapabilities = hostCapabilities;
@@ -316,13 +480,14 @@ export class McplServerConnection extends EventEmitter {
   }
 
   /**
-   * Extract internals for transfer during reconnection.
-   * Strips the source connection — caller takes ownership of the process/readline.
+   * Extract transport for transfer during reconnection.
+   * Strips the source connection — caller takes ownership of the transport.
    * @internal Used only by attemptReconnect().
    */
-  extractInternals(): { process: ChildProcess; readline: ReadlineInterface } {
-    const result = { process: this.process, readline: this.readline };
-    // Prevent the source connection from killing the transferred process
+  extractTransport(): Transport | null {
+    const result = this.transport;
+    // Prevent the source connection from closing the transferred transport
+    this.transport = null;
     this.closed = true;
     return result;
   }
@@ -437,7 +602,7 @@ export class McplServerConnection extends EventEmitter {
   // Lifecycle
   // ==========================================================================
 
-  /** Close the connection: disable reconnect, kill the child process, and clean up resources. */
+  /** Close the connection: disable reconnect, close the transport, and clean up resources. */
   async close(): Promise<void> {
     // Disable reconnect before closing — explicit close means stop retrying
     this.reconnectEnabled = false;
@@ -457,25 +622,9 @@ export class McplServerConnection extends EventEmitter {
     }
     this.pendingRequests.clear();
 
-    // Close readline
-    if (this.readline) {
-      this.readline.close();
-    }
-
-    // Kill the child process
-    if (this.process && !this.process.killed) {
-      this.process.kill();
-    }
-
-    // Wait for process to actually exit
-    if (this.process) {
-      await new Promise<void>((resolve) => {
-        if (this.process.exitCode !== null || this.process.killed) {
-          resolve();
-        } else {
-          this.process.once('exit', () => resolve());
-        }
-      });
+    // Close the transport
+    if (this.transport) {
+      await this.transport.close();
     }
 
     this.emit('close');
@@ -494,24 +643,23 @@ export class McplServerConnection extends EventEmitter {
   }
 
   /**
-   * Attempt to reconnect by spawning a new process and performing the handshake.
+   * Attempt to reconnect using the appropriate transport.
    */
   private async attemptReconnect(): Promise<void> {
     if (!this.reconnectEnabled || !this.config || !this.hostCapabilities) return;
 
     try {
-      const fresh = await McplServerConnection.connect(this.config, this.hostCapabilities);
-      const internals = fresh.extractInternals();
+      const fresh = await McplServerConnection.connectAuto(this.config, this.hostCapabilities);
+      const transport = fresh.extractTransport();
 
       // Transfer state from fresh connection to this instance
-      this.process = internals.process;
-      this.readline = internals.readline;
+      this.transport = transport;
       this.capabilities = fresh.capabilities;
       this.closed = false;
       this.nextRequestId = 1;
       this.pendingRequests.clear();
 
-      // Re-wire message routing and lifecycle on the new process
+      // Re-wire message routing and lifecycle on the new transport
       this.setupMessageRouting();
       this.setupLifecycle();
       this.readyFlag = true; // Listeners already attached from initial wire
@@ -533,7 +681,7 @@ export class McplServerConnection extends EventEmitter {
    * or rejects with a JSON-RPC error.
    */
   private sendRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
-    if (this.closed) {
+    if (this.closed || !this.transport) {
       return Promise.reject(new Error(`Cannot send request: connection to "${this.id}" is closed`));
     }
 
@@ -547,7 +695,7 @@ export class McplServerConnection extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject, method });
-      this.process.stdin!.write(JSON.stringify(request) + '\n');
+      this.transport!.write(JSON.stringify(request));
     });
   }
 
@@ -555,7 +703,7 @@ export class McplServerConnection extends EventEmitter {
    * Send a JSON-RPC notification (no `id`, no response expected).
    */
   private sendNotification(method: string, params: Record<string, unknown>): void {
-    if (this.closed) {
+    if (this.closed || !this.transport) {
       return;
     }
 
@@ -564,7 +712,7 @@ export class McplServerConnection extends EventEmitter {
       method,
       params,
     };
-    this.process.stdin!.write(JSON.stringify(notification) + '\n');
+    this.transport.write(JSON.stringify(notification));
   }
 
   // ==========================================================================
@@ -593,10 +741,10 @@ export class McplServerConnection extends EventEmitter {
   };
 
   /**
-   * Wire up readline to route incoming JSON-RPC messages.
+   * Wire up the transport to route incoming JSON-RPC messages.
    */
   private setupMessageRouting(): void {
-    this.readline.on('line', (line) => {
+    this.transport!.onMessage((line) => {
       let msg: JsonRpcRequest | JsonRpcResponse;
       try {
         msg = JSON.parse(line);
@@ -657,22 +805,22 @@ export class McplServerConnection extends EventEmitter {
    * Send a successful JSON-RPC response back to the server.
    */
   private sendResponse(id: string | number, result: unknown): void {
-    if (this.closed) return;
+    if (this.closed || !this.transport) return;
     const response: JsonRpcResponse = { jsonrpc: '2.0', id, result };
-    this.process.stdin!.write(JSON.stringify(response) + '\n');
+    this.transport.write(JSON.stringify(response));
   }
 
   /**
    * Send a JSON-RPC error response back to the server.
    */
   private sendErrorResponse(id: string | number, code: number, message: string, data?: unknown): void {
-    if (this.closed) return;
+    if (this.closed || !this.transport) return;
     const response: JsonRpcResponse = {
       jsonrpc: '2.0',
       id,
       error: { code, message, data },
     };
-    this.process.stdin!.write(JSON.stringify(response) + '\n');
+    this.transport.write(JSON.stringify(response));
   }
 
   // ==========================================================================
@@ -680,14 +828,14 @@ export class McplServerConnection extends EventEmitter {
   // ==========================================================================
 
   /**
-   * Set up process error/exit handlers.
+   * Set up transport error/close handlers.
    */
   private setupLifecycle(): void {
-    this.process.on('error', (err) => {
-      this.emit('error', new Error(`MCPL server "${this.id}" process error: ${err.message}`));
+    this.transport!.onError((err) => {
+      this.emit('error', new Error(`MCPL server "${this.id}" transport error: ${err.message}`));
     });
 
-    this.process.on('exit', (code, signal) => {
+    this.transport!.onClose((code, signal) => {
       if (!this.closed) {
         this.closed = true;
 
@@ -695,7 +843,7 @@ export class McplServerConnection extends EventEmitter {
         for (const [id, pending] of this.pendingRequests) {
           pending.reject(
             new Error(
-              `MCPL server "${this.id}" exited unexpectedly (code=${code}, signal=${signal}) while awaiting ${pending.method} (id=${id})`,
+              `MCPL server "${this.id}" closed unexpectedly (code=${code}, signal=${signal}) while awaiting ${pending.method} (id=${id})`,
             ),
           );
         }
@@ -703,7 +851,7 @@ export class McplServerConnection extends EventEmitter {
 
         this.emit('close', code, signal);
 
-        // Schedule reconnect if enabled (unexpected exit triggers auto-reconnect)
+        // Schedule reconnect if enabled (unexpected close triggers auto-reconnect)
         if (this.reconnectEnabled) {
           this.scheduleReconnect();
         }
