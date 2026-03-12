@@ -450,6 +450,11 @@ export class ApiServer {
       parent: this.currentBranch,
     });
 
+    this.framework.notifyBranchChanged('created', params.name, {
+      parent: this.currentBranch,
+      source: 'api',
+    });
+
     if (params.switchTo) {
       await this.cmdBranchSwitch({ name: params.name });
     }
@@ -471,6 +476,11 @@ export class ApiServer {
     this.broadcast('branch:switched', {
       from: previousBranch,
       to: params.name,
+    });
+
+    this.framework.notifyBranchChanged('switched', params.name, {
+      previous: previousBranch,
+      source: 'api',
     });
 
     return { switched: true };
@@ -497,6 +507,8 @@ export class ApiServer {
     store.deleteBranch(params.name);
 
     this.broadcast('branch:deleted', { name: params.name });
+
+    this.framework.notifyBranchChanged('deleted', params.name, { source: 'api' });
 
     return { deleted: true };
   }

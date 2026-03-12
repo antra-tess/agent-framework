@@ -157,6 +157,26 @@ export type TraceEvent =
       agentName: string;
       fromBranch: string;
       toBranch: string;
+    })
+
+  // MCPL state management
+  | (TraceEventBase & {
+      type: 'mcpl:state_update';
+      serverId: string;
+      featureSet: string;
+      checkpoint: string;
+      parent: string | null;
+    })
+
+  // Branch lifecycle
+  | (TraceEventBase & {
+      type: 'branches:changed';
+      event: 'created' | 'switched' | 'deleted';
+      branch: string;
+      head?: number;
+      previous?: string;
+      parent?: string;
+      source: 'mcpl' | 'api' | 'host';
     });
 
 /**
