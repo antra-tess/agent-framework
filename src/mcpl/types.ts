@@ -1,5 +1,5 @@
 /**
- * MCPL (MCP Live) Protocol Types — v0.4.0-draft
+ * MCPL (MCP Live) Protocol Types — v0.5.0-draft
  *
  * Type definitions for the host-side implementation of the MCPL protocol.
  * Organized by spec section for easy cross-referencing with mcpl/SPEC.md.
@@ -116,6 +116,9 @@ export interface McplCapabilities {
     streaming?: boolean;
   };
 
+  /** Server supports state/update (server-initiated state sync) */
+  stateUpdate?: boolean;
+
   /** Server supports model/info requests */
   modelInfo?: boolean;
 
@@ -124,6 +127,9 @@ export interface McplCapabilities {
 
   /** Channel capabilities */
   channels?: McplChannelCapabilities;
+
+  /** Branch capabilities */
+  branches?: McplBranchCapabilities;
 }
 
 /**
@@ -140,8 +146,18 @@ export interface McplHostCapabilities {
   inferenceRequest?: {
     streaming?: boolean;
   };
+  stateUpdate?: boolean;
   featureSets?: boolean;
   channels?: McplChannelCapabilities;
+  branches?: McplBranchCapabilities;
+}
+
+/** Branch-specific capability flags. */
+export interface McplBranchCapabilities {
+  list?: boolean;
+  create?: boolean;
+  switch?: boolean;
+  delete?: boolean;
 }
 
 /** Channel-specific capability flags. */
@@ -165,13 +181,29 @@ export interface McplServerConfig {
   /** Unique server identifier */
   id: string;
 
-  /** Command to spawn the server process (stdio transport) */
-  command: string;
+  /**
+   * Command to spawn the server process (stdio transport).
+   * Mutually exclusive with `url`. One of `command` or `url` must be provided.
+   */
+  command?: string;
 
-  /** Arguments for the command */
+  /**
+   * WebSocket URL for remote MCPL servers (e.g., "wss://example.com/mcpl").
+   * When present, connects via WebSocket instead of spawning a child process.
+   * Mutually exclusive with `command`. One of `command` or `url` must be provided.
+   */
+  url?: string;
+
+  /**
+   * Authentication token for WebSocket connections.
+   * Sent as a query parameter: `wss://example.com/mcpl?token=<token>`.
+   */
+  token?: string;
+
+  /** Arguments for the command (stdio only) */
   args?: string[];
 
-  /** Environment variables for the child process */
+  /** Environment variables for the child process (stdio only) */
   env?: Record<string, string>;
 
   /** Feature sets to enable on connect */
@@ -234,9 +266,11 @@ export type FeatureSetUse =
   | 'contextHooks.beforeInference'
   | 'contextHooks.afterInference'
   | 'inferenceRequest'
+  | 'stateUpdate'
   | 'tools'
   | 'channels.publish'
-  | 'channels.observe';
+  | 'channels.observe'
+  | 'branches';
 
 /**
  * A feature set declaration as advertised by a server.
@@ -380,6 +414,27 @@ export interface JsonPatchOperation {
 }
 
 /**
+ * state/get params (Server → Host, Request).
+ * Spec Section 8.10.
+ */
+export interface StateGetParams {
+  /** Feature set to retrieve state for */
+  featureSet: string;
+}
+
+/**
+ * state/get result (Host → Server).
+ * Spec Section 8.10.
+ */
+export interface StateGetResult {
+  /** Current checkpoint ID (null if no state has been recorded yet) */
+  checkpoint: string | null;
+
+  /** Current reconstructed state */
+  data: unknown;
+}
+
+/**
  * state/rollback params (Host → Server, Request).
  * Spec Section 8.5.
  */
@@ -403,6 +458,54 @@ export interface StateRollbackResult {
   success: boolean;
 
   /** Reason for failure (present if success: false) */
+  reason?: string;
+
+  /**
+   * Full state at the rolled-back checkpoint (for host-managed state).
+   * Allows servers with local state (e.g., editors) to update without
+   * an extra state/get round-trip.
+   */
+  data?: unknown;
+}
+
+/**
+ * state/update params (Server → Host, Request).
+ * Spec Section 8.8.
+ */
+export interface StateUpdateParams {
+  /** Declaring feature set */
+  featureSet: string;
+
+  /** New checkpoint identifier */
+  checkpoint: string;
+
+  /** Parent checkpoint (null for initial state) */
+  parent: string | null;
+
+  /**
+   * Full state data (mutually exclusive with `patch`).
+   * When both `data` and `patch` are absent, the checkpoint is an opaque
+   * reference and the server manages state internally.
+   */
+  data?: unknown;
+
+  /**
+   * JSON Patch (RFC 6902) delta from parent (mutually exclusive with `data`).
+   * When both `data` and `patch` are absent, the checkpoint is an opaque
+   * reference and the server manages state internally.
+   */
+  patch?: JsonPatchOperation[];
+}
+
+/**
+ * state/update result (Host → Server).
+ * Spec Section 8.8.
+ */
+export interface StateUpdateResult {
+  /** Whether the host accepted the state update */
+  accepted: boolean;
+
+  /** Present if accepted: false */
   reason?: string;
 }
 
@@ -912,6 +1015,109 @@ export interface InferenceRoutingPolicy {
 }
 
 // ============================================================================
+// Section 15 — Branches
+// ============================================================================
+
+/**
+ * Branch info as returned by branches/list.
+ * Spec Section 15.2.
+ */
+export interface BranchInfo {
+  name: string;
+  head: number;
+  isCurrent: boolean;
+  parent: string | null;
+  branchPoint: number | null;
+}
+
+/**
+ * branches/list params (Server → Host, Request).
+ * Spec Section 15.2.
+ */
+export interface BranchesListParams {
+  featureSet: string;
+}
+
+export interface BranchesListResult {
+  branches: BranchInfo[];
+}
+
+/**
+ * branches/current params (Server → Host, Request).
+ * Spec Section 15.3.
+ */
+export interface BranchesCurrentParams {
+  featureSet: string;
+}
+
+export interface BranchesCurrentResult {
+  name: string;
+  head: number;
+}
+
+/**
+ * branches/create params (Server → Host, Request).
+ * Spec Section 15.4.
+ */
+export interface BranchesCreateParams {
+  featureSet: string;
+  name: string;
+  from?: string;
+  atCheckpoint?: string;
+}
+
+export interface BranchesCreateResult {
+  accepted: boolean;
+  name?: string;
+  head?: number;
+  reason?: string;
+}
+
+/**
+ * branches/switch params (Server → Host, Request).
+ * Spec Section 15.5.
+ */
+export interface BranchesSwitchParams {
+  featureSet: string;
+  name: string;
+}
+
+export interface BranchesSwitchResult {
+  accepted: boolean;
+  name?: string;
+  head?: number;
+  previous?: string;
+  reason?: string;
+}
+
+/**
+ * branches/delete params (Server → Host, Request).
+ * Spec Section 15.6.
+ */
+export interface BranchesDeleteParams {
+  featureSet: string;
+  name: string;
+}
+
+export interface BranchesDeleteResult {
+  accepted: boolean;
+  name?: string;
+  reason?: string;
+}
+
+/**
+ * branches/changed params (Host → Server, Notification).
+ * Spec Section 15.7.
+ */
+export interface BranchesChangedParams {
+  event: 'created' | 'switched' | 'deleted';
+  branch: string;
+  previous?: string;
+  head?: number;
+  parent?: string;
+}
+
+// ============================================================================
 // MCPL Method Names (string constants for routing)
 // ============================================================================
 
@@ -938,7 +1144,9 @@ export const McplMethod = {
   // Scoped access (Server → Host)
   ScopeElevate: 'scope/elevate',
 
-  // State management (Host → Server)
+  // State management
+  StateUpdate: 'state/update',
+  StateGet: 'state/get',
   StateRollback: 'state/rollback',
 
   // Channels
@@ -952,6 +1160,14 @@ export const McplMethod = {
   ChannelsPublish: 'channels/publish',
   ChannelsIncoming: 'channels/incoming',
   ChannelsTyping: 'channels/typing',
+
+  // Branches (Server → Host, except Changed which is Host → Server)
+  BranchesList: 'branches/list',
+  BranchesCurrent: 'branches/current',
+  BranchesCreate: 'branches/create',
+  BranchesSwitch: 'branches/switch',
+  BranchesDelete: 'branches/delete',
+  BranchesChanged: 'branches/changed',
 } as const;
 
 export type McplMethodName = (typeof McplMethod)[keyof typeof McplMethod];

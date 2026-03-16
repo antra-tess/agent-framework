@@ -62,6 +62,21 @@ import type {
   ChannelsRegisterParams,
   ChannelsChangedParams,
   ChannelsIncomingParams,
+  StateUpdateParams,
+  StateUpdateResult,
+  StateGetParams,
+  StateGetResult,
+  BranchesListParams,
+  BranchesListResult,
+  BranchesCurrentParams,
+  BranchesCurrentResult,
+  BranchesCreateParams,
+  BranchesCreateResult,
+  BranchesSwitchParams,
+  BranchesSwitchResult,
+  BranchesDeleteParams,
+  BranchesDeleteResult,
+  BranchInfo,
 } from './mcpl/types.js';
 import type { ContextInjection } from '@connectome/context-manager';
 
@@ -1417,6 +1432,303 @@ export class AgentFramework {
     }
   }
 
+  /**
+   * Handle a state/update from an MCPL server (Section 8.8).
+   * Validates the feature set, checks parent checkpoint matches, and records
+   * the checkpoint in the CheckpointManager.
+   */
+  private handleStateUpdate(
+    serverId: string,
+    params: StateUpdateParams,
+    responder?: { respond: (result: unknown) => void; respondError: (code: number, message: string, data?: unknown) => void },
+  ): void {
+    // Validate feature set
+    try {
+      this.featureSetManager?.validateInbound(serverId, params.featureSet);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'Feature set validation failed';
+      const result: StateUpdateResult = { accepted: false, reason };
+      responder?.respond(result);
+      return;
+    }
+
+    // Validate payload: data and patch are mutually exclusive (both absent = opaque checkpoint)
+    if (params.data !== undefined && params.patch !== undefined) {
+      const result: StateUpdateResult = { accepted: false, reason: 'data and patch are mutually exclusive' };
+      responder?.respond(result);
+      return;
+    }
+
+    if (!this.checkpointManager) {
+      const result: StateUpdateResult = { accepted: false, reason: 'State management not available' };
+      responder?.respond(result);
+      return;
+    }
+
+    // Reject if the feature set isn't registered as stateful
+    if (!this.checkpointManager.isStateful(serverId, params.featureSet)) {
+      const result: StateUpdateResult = { accepted: false, reason: 'Feature set is not registered as stateful' };
+      responder?.respond(result);
+      return;
+    }
+
+    // Optimistic concurrency: check parent matches current checkpoint
+    const currentCheckpoint = this.checkpointManager.getCurrentCheckpoint(serverId, params.featureSet);
+    if (params.parent !== null && currentCheckpoint !== null && params.parent !== currentCheckpoint) {
+      const result: StateUpdateResult = {
+        accepted: false,
+        reason: `Parent mismatch: expected "${currentCheckpoint}", got "${params.parent}"`,
+      };
+      responder?.respond(result);
+      return;
+    }
+
+    // Record the checkpoint (same path as tool call responses)
+    this.checkpointManager.recordCheckpoint(serverId, params.featureSet, {
+      checkpoint: params.checkpoint,
+      parent: params.parent,
+      data: params.data,
+      patch: params.patch,
+    });
+
+    this.emitTrace({
+      type: 'mcpl:state_update',
+      serverId,
+      featureSet: params.featureSet,
+      checkpoint: params.checkpoint,
+      parent: params.parent,
+    });
+
+    const result: StateUpdateResult = { accepted: true };
+    responder?.respond(result);
+  }
+
+  /**
+   * Handle a state/get from an MCPL server (Section 8.10).
+   * Returns the current host-managed state for the requested feature set.
+   */
+  private handleStateGet(
+    serverId: string,
+    params: StateGetParams,
+    responder?: { respond: (result: unknown) => void; respondError: (code: number, message: string, data?: unknown) => void },
+  ): void {
+    if (!responder) return;
+
+    // Validate feature set
+    try {
+      this.featureSetManager?.validateInbound(serverId, params.featureSet);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'Feature set validation failed';
+      responder.respondError(-32001, reason);
+      return;
+    }
+
+    if (!this.checkpointManager) {
+      responder.respondError(-32006, 'No host-managed state for feature set', { featureSet: params.featureSet });
+      return;
+    }
+
+    if (!this.checkpointManager.isHostManaged(serverId, params.featureSet)) {
+      responder.respondError(-32006, 'No host-managed state for feature set', { featureSet: params.featureSet });
+      return;
+    }
+
+    const checkpoint = this.checkpointManager.getCurrentCheckpoint(serverId, params.featureSet);
+    const data = this.checkpointManager.getCurrentState(serverId, params.featureSet);
+
+    const result: StateGetResult = { checkpoint, data: data ?? null };
+    responder.respond(result);
+  }
+
+  // ==========================================================================
+  // Branches (Section 15)
+  // ==========================================================================
+
+  private handleBranchesList(
+    serverId: string,
+    params: BranchesListParams,
+    responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void },
+  ): void {
+    if (!responder) return;
+    try {
+      this.featureSetManager?.validateInbound(serverId, params.featureSet);
+    } catch (err) {
+      responder.respondError(-32001, err instanceof Error ? err.message : 'Feature set validation failed');
+      return;
+    }
+
+    const branches = this.store.listBranches();
+    const current = this.store.currentBranch();
+    const branchMap = new Map(branches.map(b => [b.id, b]));
+
+    const result: BranchesListResult = {
+      branches: branches.map(b => ({
+        name: b.name,
+        head: b.head,
+        isCurrent: b.id === current.id,
+        parent: b.parentId ? branchMap.get(b.parentId)?.name ?? null : null,
+        branchPoint: b.branchPoint ?? null,
+      })),
+    };
+    responder.respond(result);
+  }
+
+  private handleBranchesCurrent(
+    serverId: string,
+    params: BranchesCurrentParams,
+    responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void },
+  ): void {
+    if (!responder) return;
+    try {
+      this.featureSetManager?.validateInbound(serverId, params.featureSet);
+    } catch (err) {
+      responder.respondError(-32001, err instanceof Error ? err.message : 'Feature set validation failed');
+      return;
+    }
+
+    const branch = this.store.currentBranch();
+    const result: BranchesCurrentResult = { name: branch.name, head: branch.head };
+    responder.respond(result);
+  }
+
+  private handleBranchesCreate(
+    serverId: string,
+    params: BranchesCreateParams,
+    responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void },
+  ): void {
+    if (!responder) return;
+    try {
+      this.featureSetManager?.validateInbound(serverId, params.featureSet);
+    } catch (err) {
+      responder.respondError(-32001, err instanceof Error ? err.message : 'Feature set validation failed');
+      return;
+    }
+
+    try {
+      const from = params.from ?? undefined;
+      const branch = this.store.createBranch(params.name, from);
+
+      this.notifyBranchChanged('created', branch.name, {
+        head: branch.head,
+        parent: from ?? this.store.currentBranch().name,
+        source: 'mcpl',
+      });
+
+      const result: BranchesCreateResult = { accepted: true, name: branch.name, head: branch.head };
+      responder.respond(result);
+    } catch (err) {
+      const result: BranchesCreateResult = { accepted: false, reason: err instanceof Error ? err.message : 'Branch creation failed' };
+      responder.respond(result);
+    }
+  }
+
+  private handleBranchesSwitch(
+    serverId: string,
+    params: BranchesSwitchParams,
+    responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void },
+  ): void {
+    if (!responder) return;
+    try {
+      this.featureSetManager?.validateInbound(serverId, params.featureSet);
+    } catch (err) {
+      responder.respondError(-32001, err instanceof Error ? err.message : 'Feature set validation failed');
+      return;
+    }
+
+    try {
+      const previous = this.store.currentBranch().name;
+      const branch = this.store.switchBranch(params.name);
+
+      this.notifyBranchChanged('switched', branch.name, {
+        head: branch.head,
+        previous,
+        source: 'mcpl',
+      });
+
+      const result: BranchesSwitchResult = { accepted: true, name: branch.name, head: branch.head, previous };
+      responder.respond(result);
+    } catch (err) {
+      const result: BranchesSwitchResult = { accepted: false, reason: err instanceof Error ? err.message : 'Branch switch failed' };
+      responder.respond(result);
+    }
+  }
+
+  private handleBranchesDelete(
+    serverId: string,
+    params: BranchesDeleteParams,
+    responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void },
+  ): void {
+    if (!responder) return;
+    try {
+      this.featureSetManager?.validateInbound(serverId, params.featureSet);
+    } catch (err) {
+      responder.respondError(-32001, err instanceof Error ? err.message : 'Feature set validation failed');
+      return;
+    }
+
+    // Reject deletion of current branch
+    const current = this.store.currentBranch();
+    if (current.name === params.name) {
+      const result: BranchesDeleteResult = { accepted: false, reason: 'Cannot delete the current branch' };
+      responder.respond(result);
+      return;
+    }
+
+    try {
+      this.store.deleteBranch(params.name);
+
+      this.notifyBranchChanged('deleted', params.name, { source: 'mcpl' });
+
+      const result: BranchesDeleteResult = { accepted: true, name: params.name };
+      responder.respond(result);
+    } catch (err) {
+      const result: BranchesDeleteResult = { accepted: false, reason: err instanceof Error ? err.message : 'Branch deletion failed' };
+      responder.respond(result);
+    }
+  }
+
+  /**
+   * Broadcast a branches/changed notification to all connected MCPL servers.
+   */
+  private broadcastBranchesChanged(params: import('./mcpl/types.js').BranchesChangedParams): void {
+    if (!this.mcplServerRegistry) return;
+    for (const server of this.mcplServerRegistry.getAllServers()) {
+      server.sendBranchesChanged(params);
+    }
+  }
+
+  /**
+   * Notify the system that a branch operation occurred.
+   * Emits a trace event (for TUI/observers) and broadcasts to MCPL servers.
+   * Public so that ApiServer and other components can call it.
+   */
+  notifyBranchChanged(event: 'created' | 'switched' | 'deleted', branch: string, opts?: {
+    head?: number;
+    previous?: string;
+    parent?: string;
+    source?: 'mcpl' | 'api' | 'host';
+  }): void {
+    const source = opts?.source ?? 'host';
+
+    this.broadcastBranchesChanged({
+      event,
+      branch,
+      ...(opts?.head !== undefined ? { head: opts.head } : {}),
+      ...(opts?.previous ? { previous: opts.previous } : {}),
+      ...(opts?.parent ? { parent: opts.parent } : {}),
+    });
+
+    this.emitTrace({
+      type: 'branches:changed',
+      event,
+      branch,
+      ...(opts?.head !== undefined ? { head: opts.head } : {}),
+      ...(opts?.previous ? { previous: opts.previous } : {}),
+      ...(opts?.parent ? { parent: opts.parent } : {}),
+      source,
+    });
+  }
+
   private async processInferenceRequests(): Promise<void> {
     if (this.pendingRequests.length === 0) {
       return;
@@ -1978,15 +2290,15 @@ export class AgentFramework {
     this.emitTrace({
       type: 'tool:started',
       module: moduleName,
-      tool: enrichedCall.name,
-      callId: enrichedCall.id,
-      input: enrichedCall.input,
+      tool: call.name,
+      callId: call.id,
+      input: call.input,
     });
 
     const startTime = Date.now();
 
     this.moduleRegistry
-      .handleToolCall(enrichedCall)
+      .handleToolCall(call)
       .then((result) => {
         const durationMs = Date.now() - startTime;
         this.emitTrace({
@@ -2179,13 +2491,20 @@ export class AgentFramework {
 
     // Host capabilities advertised during the MCP handshake
     const hostCapabilities: McplHostCapabilities = {
-      version: '0.4',
+      version: '0.5',
       pushEvents: true,
       contextHooks: {
         beforeInference: true,
         afterInference: { blocking: true },
       },
+      stateUpdate: true,
       featureSets: true,
+      branches: {
+        list: true,
+        create: true,
+        switch: true,
+        delete: true,
+      },
     };
 
     for (const config of serverConfigs) {
@@ -2278,6 +2597,39 @@ export class AgentFramework {
       responder?: { respond: (result: unknown) => void; respondError: (code: number, message: string) => void },
     ) => {
       this.pushHandler?.handlePushEvent(connection.id, params, responder as never);
+    });
+
+    // Handle server-initiated state updates (Section 8.8)
+    connection.on('state-update', (
+      params: StateUpdateParams,
+      responder?: { respond: (result: unknown) => void; respondError: (code: number, message: string, data?: unknown) => void },
+    ) => {
+      this.handleStateUpdate(connection.id, params, responder);
+    });
+
+    // Handle server state retrieval (Section 8.10)
+    connection.on('state-get', (
+      params: StateGetParams,
+      responder?: { respond: (result: unknown) => void; respondError: (code: number, message: string, data?: unknown) => void },
+    ) => {
+      this.handleStateGet(connection.id, params, responder);
+    });
+
+    // Handle branches (Section 15)
+    connection.on('branches-list', (params: BranchesListParams, responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void }) => {
+      this.handleBranchesList(connection.id, params, responder);
+    });
+    connection.on('branches-current', (params: BranchesCurrentParams, responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void }) => {
+      this.handleBranchesCurrent(connection.id, params, responder);
+    });
+    connection.on('branches-create', (params: BranchesCreateParams, responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void }) => {
+      this.handleBranchesCreate(connection.id, params, responder);
+    });
+    connection.on('branches-switch', (params: BranchesSwitchParams, responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void }) => {
+      this.handleBranchesSwitch(connection.id, params, responder);
+    });
+    connection.on('branches-delete', (params: BranchesDeleteParams, responder?: { respond: (r: unknown) => void; respondError: (c: number, m: string, d?: unknown) => void }) => {
+      this.handleBranchesDelete(connection.id, params, responder);
     });
 
     // Handle server-initiated inference requests (Step 6)
