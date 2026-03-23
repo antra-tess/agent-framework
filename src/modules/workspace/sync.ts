@@ -176,7 +176,7 @@ export async function materializeToFs(
       .filter(c => c.changeType === 'added' || c.changeType === 'modified')
       .map(c => ({
         path: c.path,
-        blobHash: (c.entry ?? c.newEntry)!.blobHash,
+        blobHash: c.newEntry!.blobHash,
       }));
 
     // Handle removals
