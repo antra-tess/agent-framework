@@ -89,6 +89,7 @@ export class WorkspaceModule implements Module {
         lastMaterializedSeq: 0,
         suppressedPaths: new Set(),
         initialSyncDone: false,
+        lastMaterializedBranchId: null,
       };
       this.mounts.set(mount.name, mountState);
     }
@@ -105,6 +106,7 @@ export class WorkspaceModule implements Module {
           const mount = this.mounts.get(name);
           if (mount) {
             mount.lastMaterializedSeq = meta.lastMaterializedSeq;
+            mount.lastMaterializedBranchId = meta.lastMaterializedBranchId ?? null;
           }
         }
       }
@@ -133,10 +135,12 @@ export class WorkspaceModule implements Module {
   async stop(): Promise<void> {
     // Persist state
     if (this.ctx) {
-      const state: WorkspaceModuleState = { mounts: {} };
+      const activeBranchId = this.store ? this.store.currentBranch().id : undefined;
+      const state: WorkspaceModuleState = { mounts: {}, activeBranchId };
       for (const [name, mount] of this.mounts) {
         state.mounts[name] = {
           lastMaterializedSeq: mount.lastMaterializedSeq,
+          lastMaterializedBranchId: mount.lastMaterializedBranchId ?? undefined,
         };
       }
       this.ctx.setState(state);
@@ -706,6 +710,7 @@ export class WorkspaceModule implements Module {
         ? store.treeDiff(mount.treeStateId, mount.lastMaterializedSeq, currentSeq)
         : [];
 
+      const currentBranch = store.currentBranch();
       status[name] = {
         path: mount.config.path,
         mode: mount.config.mode,
@@ -715,6 +720,9 @@ export class WorkspaceModule implements Module {
         currentSeq,
         pendingChanges: changes.length,
         initialSyncDone: mount.initialSyncDone,
+        currentBranch: currentBranch.name,
+        lastMaterializedBranch: mount.lastMaterializedBranchId,
+        canMaterialize: !mount.lastMaterializedBranchId || mount.lastMaterializedBranchId === currentBranch.id,
       };
     }
 
@@ -723,6 +731,21 @@ export class WorkspaceModule implements Module {
 
   private async handleMaterialize(input: MaterializeInput): Promise<ToolResult> {
     const store = this.getStore();
+
+    // Guard: only materialize on the active branch
+    if (this.config.materializeOnlyActiveBranch !== false) {
+      const currentBranch = store.currentBranch();
+      for (const mount of this.mounts.values()) {
+        if (mount.lastMaterializedBranchId && mount.lastMaterializedBranchId !== currentBranch.id) {
+          return {
+            success: false,
+            error: `Cannot materialize: current branch "${currentBranch.name}" differs from last materialized branch. Switch back or set materializeOnlyActiveBranch: false.`,
+            isError: true,
+          };
+        }
+      }
+    }
+
     const allWritten: Array<{ mount: string; path: string }> = [];
 
     const mountsToMaterialize = input.mount
@@ -747,6 +770,11 @@ export class WorkspaceModule implements Module {
       for (const p of written) {
         watcher?.suppress(p);
         allWritten.push({ mount: name, path: p });
+      }
+
+      // Track which branch we materialized on
+      if (written.length > 0) {
+        mount.lastMaterializedBranchId = store.currentBranch().id;
       }
     }
 

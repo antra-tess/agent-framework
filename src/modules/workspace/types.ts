@@ -65,6 +65,8 @@ export interface MountState {
   suppressedPaths: Set<string>;
   /** Whether initial lazy sync has been completed */
   initialSyncDone: boolean;
+  /** Branch ID that was active when this mount last materialized */
+  lastMaterializedBranchId: string | null;
 }
 
 /**
@@ -74,7 +76,10 @@ export interface WorkspaceModuleState {
   /** Per-mount metadata */
   mounts: Record<string, {
     lastMaterializedSeq: number;
+    lastMaterializedBranchId?: string;
   }>;
+  /** Branch ID considered "active" for materialization */
+  activeBranchId?: string;
 }
 
 // ============================================================================
