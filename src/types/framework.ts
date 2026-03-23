@@ -4,6 +4,7 @@ import type { Module, EventResponse } from './module.js';
 import type { AgentConfig, InferenceRequest } from './agent.js';
 import type { ProcessEvent } from './events.js';
 import type { McplServerConfig, InferenceRoutingPolicy } from '../mcpl/types.js';
+import type { GateOptions } from '../gate/types.js';
 
 // Re-export trace types
 export type { TraceEvent, TraceEventListener } from './trace.js';
@@ -62,6 +63,9 @@ export interface FrameworkConfig {
 
   /** Inference routing policy for server-initiated inference (optional). */
   inferenceRouting?: InferenceRoutingPolicy;
+
+  /** EventGate config. If omitted, all events trigger inference (unchanged default). */
+  gate?: GateOptions;
 }
 
 /**

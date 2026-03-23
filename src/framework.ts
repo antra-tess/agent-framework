@@ -49,6 +49,7 @@ import { InferenceRouter } from './mcpl/inference-router.js';
 import { ChannelRegistry } from './mcpl/channel-registry.js';
 import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
+import { EventGate } from './gate/event-gate.js';
 import type { McplServerConnection } from './mcpl/server-connection.js';
 import type {
   McplServerConfig,
@@ -167,6 +168,9 @@ export class AgentFramework {
   /** Maps serverId → McplServerConfig for prefix lookup. */
   private mcplServerConfigs: Map<string, import('./mcpl/types.js').McplServerConfig> = new Map();
 
+  // EventGate (null when FrameworkConfig.gate is omitted)
+  private eventGate: EventGate | null = null;
+
   private constructor(
     store: JsStore,
     ownsStore: boolean,
@@ -280,6 +284,24 @@ export class AgentFramework {
       await framework.addModule(module);
     }
 
+    // Initialize EventGate if configured (before MCPL so it can be wired as trigger filter)
+    if (config.gate) {
+      const configPath = config.gate.configPath
+        ?? (config.storePath
+          ? config.storePath.replace(/\/[^/]+$/, '/gate.json')
+          : './data/gate.json');
+      framework.eventGate = new EventGate({
+        configPath,
+        initialConfig: config.gate.config,
+        emitTrace: (e) => framework.emitTrace(e as { type: TraceEvent['type']; [key: string]: unknown }),
+        addMessage: (p, c, m) => framework.addMessage(p, c, m as MessageMetadata),
+        requestInference: (agentName, reason, source) => {
+          framework.pendingRequests.push({ agentName, reason, source, timestamp: Date.now() });
+        },
+        getAgentNames: () => [...framework.agents.keys()],
+      });
+    }
+
     // Initialize MCPL subsystems if configured
     if (config.mcplServers && config.mcplServers.length > 0) {
       // Validate tool prefixes: no collisions with module names or between servers
@@ -362,6 +384,9 @@ export class AgentFramework {
 
     // Stop typing indicators
     this.channelRegistry?.stopAll();
+
+    // Dispose EventGate (clear debounce timers)
+    this.eventGate?.dispose();
 
     // Stop modules and MCPL servers in parallel
     const shutdownPromises: Promise<void>[] = [this.moduleRegistry.stopAll()];
@@ -465,10 +490,11 @@ export class AgentFramework {
   getAllTools(): import('./types/index.js').ToolDefinition[] {
     const moduleTools = this.moduleRegistry.getAllTools();
     const channelTools = this.channelRegistry?.getChannelTools() ?? [];
-    if (this.mcplTools.length === 0 && channelTools.length === 0) {
+    const gateTools = this.eventGate ? [this.eventGate.getToolDefinition()] : [];
+    if (this.mcplTools.length === 0 && channelTools.length === 0 && gateTools.length === 0) {
       return moduleTools;
     }
-    return [...moduleTools, ...this.mcplTools, ...channelTools];
+    return [...moduleTools, ...this.mcplTools, ...channelTools, ...gateTools];
   }
 
   /**
@@ -1372,6 +1398,20 @@ export class AgentFramework {
     // Queue inference requests
     if (response.requestInference) {
       const source = 'source' in event ? (event as { source: string }).source : 'unknown';
+
+      // Gate non-MCPL events (MCPL events are already gated in PushHandler/ChannelRegistry)
+      if (this.eventGate && event.type !== 'mcpl:push-event' && event.type !== 'mcpl:channel-incoming') {
+        const content = 'content' in event ? String((event as { content: unknown }).content) : '';
+        const decision = this.eventGate.evaluate({
+          content,
+          eventType: event.type,
+          serverId: source,
+          channelId: '',
+          metadata: 'metadata' in event ? (event as { metadata: Record<string, unknown> }).metadata : {},
+        });
+        if (!decision.trigger) return;
+      }
+
       const targetAgents =
         response.requestInference === true
           ? Array.from(this.agents.keys())
@@ -1536,6 +1576,7 @@ export class AgentFramework {
     }
 
     this.emitTrace({ type: 'inference:started', agentName: agent.name });
+    this.eventGate?.onInferenceStarted(agent.name);
 
     try {
       const allTools = this.getAllTools();
@@ -1592,6 +1633,7 @@ export class AgentFramework {
           agentName: agent.name,
           error: err.message,
         });
+        this.eventGate?.onInferenceEnded(agent.name);
         if (action.emit) {
           this.pushEvent(action.emit);
         }
@@ -1869,6 +1911,7 @@ export class AgentFramework {
 
             // Done — reset to idle
             agent.reset();
+            this.eventGate?.onInferenceEnded(agent.name);
             break;
           }
 
@@ -1907,6 +1950,7 @@ export class AgentFramework {
                 agentName: agent.name,
                 error: err.message,
               });
+              this.eventGate?.onInferenceEnded(agent.name);
               if (action.emit) {
                 this.pushEvent(action.emit);
               }
@@ -1925,6 +1969,7 @@ export class AgentFramework {
                 agentName: agent.name,
                 error: `Stream aborted: ${reason}`,
               });
+              this.eventGate?.onInferenceEnded(agent.name);
             }
             break;
           }
@@ -1958,6 +2003,7 @@ export class AgentFramework {
         error: err.message,
       });
       agent.reset();
+      this.eventGate?.onInferenceEnded(agent.name);
     } finally {
       this.activeStreams.delete(agent.name);
       this.pendingAssistantBlocks.delete(agent.name);
@@ -2122,6 +2168,12 @@ export class AgentFramework {
     // Route synthesized channel tools
     if (enrichedCall.name.startsWith('channel_') && this.channelRegistry) {
       this.dispatchChannelToolCall(agentName, enrichedCall);
+      return;
+    }
+
+    // Route gate:status tool
+    if (enrichedCall.name === 'gate:status' && this.eventGate) {
+      this.dispatchGateToolCall(agentName, enrichedCall);
       return;
     }
 
@@ -2316,8 +2368,10 @@ export class AgentFramework {
       this.mcplServerConfigs.set(config.id, config);
     }
 
-    // Find shouldTriggerInference callback from server configs (first one wins)
-    const triggerFilter = serverConfigs.find(c => c.shouldTriggerInference)?.shouldTriggerInference;
+    // Find shouldTriggerInference callback:
+    // Per-server callback takes precedence; fall back to EventGate; fall back to no filter.
+    const triggerFilter = serverConfigs.find(c => c.shouldTriggerInference)?.shouldTriggerInference
+      ?? (this.eventGate ? this.eventGate.asShouldTriggerCallback() : undefined);
 
     // Push events handler (Step 6)
     this.pushHandler = new PushHandler(
@@ -2717,6 +2771,35 @@ export class AgentFramework {
           callId: call.id,
           agentName,
           moduleName: 'channels',
+          result: { success: false, error: err.message, isError: true },
+        });
+      });
+  }
+
+  private dispatchGateToolCall(agentName: string, call: ToolCall): void {
+    this.emitTrace({ type: 'tool:started', module: 'gate', tool: call.name, callId: call.id, input: call.input });
+    const startTime = Date.now();
+
+    this.eventGate!.handleToolCall()
+      .then((result) => {
+        const durationMs = Date.now() - startTime;
+        this.emitTrace({ type: 'tool:completed', module: 'gate', tool: call.name, callId: call.id, durationMs });
+        this.pushEvent({
+          type: 'tool-result',
+          callId: call.id,
+          agentName,
+          moduleName: 'gate',
+          result,
+        });
+      })
+      .catch((error) => {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.emitTrace({ type: 'tool:failed', module: 'gate', tool: call.name, callId: call.id, error: err.message });
+        this.pushEvent({
+          type: 'tool-result',
+          callId: call.id,
+          agentName,
+          moduleName: 'gate',
           result: { success: false, error: err.message, isError: true },
         });
       });

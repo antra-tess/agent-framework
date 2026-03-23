@@ -151,6 +151,30 @@ export type TraceEvent =
       source: string;
     })
 
+  // EventGate lifecycle
+  | (TraceEventBase & {
+      type: 'gate:policy-matched';
+      policyName: string;
+      behavior: string;
+      eventType: string;
+      source?: string;
+    })
+  | (TraceEventBase & {
+      type: 'gate:config-error';
+      error: string;
+      configPath: string;
+    })
+  | (TraceEventBase & {
+      type: 'gate:debounce-delivered';
+      policyName: string;
+      eventCount: number;
+    })
+  | (TraceEventBase & {
+      type: 'gate:config-reloaded';
+      configPath: string;
+      policyCount: number;
+    })
+
   // Undo/redo lifecycle
   | (TraceEventBase & {
       type: 'undo:completed';

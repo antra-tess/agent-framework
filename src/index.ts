@@ -52,6 +52,10 @@ export type {
 // Note: AgentInfo, MessageEditedEvent, MessageRemovedEvent intentionally not re-exported
 // from api/types.js to avoid conflicts with ./types/index.js
 
+// EventGate
+export { EventGate } from './gate/index.js';
+export type { GateConfig, GateOptions, GatePolicy, GatePolicyMatch, GateBehavior } from './gate/index.js';
+
 // Re-export commonly used types from dependencies
 export type { ContextManager, ContextStrategy, TokenBudget } from '@connectome/context-manager';
 export { PassthroughStrategy, AutobiographicalStrategy, KnowledgeStrategy } from '@connectome/context-manager';
