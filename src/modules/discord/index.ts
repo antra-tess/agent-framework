@@ -92,6 +92,9 @@ export class DiscordModule implements Module {
   // Track current reply context per agent
   private replyContexts: Map<string, ConversationContext> = new Map();
 
+  // Last message sent by a tool (for thought-editing)
+  private lastSentMessage: { channelId: string; messageId: string } | null = null;
+
   constructor(client: DiscordClientInterface, config: DiscordModuleConfig) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -467,8 +470,29 @@ export class DiscordModule implements Module {
   async onAgentSpeech(
     agentName: string,
     content: ContentBlock[],
-    _context: SpeechContext
+    context: SpeechContext
   ): Promise<void> {
+    // If thoughts are present and we have a recently sent message, edit it
+    // to prepend the thoughts as spoiler text.
+    if (context.thoughts && context.thoughts.length > 0 && this.lastSentMessage) {
+      const thoughtText = this.extractText(context.thoughts);
+      if (thoughtText) {
+        try {
+          const { channelId, messageId } = this.lastSentMessage;
+          // Fetch the current message content via the client isn't available,
+          // but we know the tool just sent it — reconstruct by editing with
+          // spoiler-wrapped thoughts prepended.
+          // Discord API edit replaces content, so we need the original text.
+          // We don't have it here, so use a get-then-edit pattern via the API.
+          // For now, the simplest approach: the discord.js client can fetch & edit.
+          await this.editWithThoughts(channelId, messageId, thoughtText);
+        } catch (err) {
+          console.warn('Discord: Failed to edit thoughts into message:', err);
+        }
+      }
+      this.lastSentMessage = null;
+    }
+
     // Get reply context for this agent
     const replyCtx = this.replyContexts.get(agentName) ?? this.replyContexts.get('default');
     if (!replyCtx) {
@@ -491,13 +515,31 @@ export class DiscordModule implements Module {
 
     // Send to Discord
     const targetChannel = replyCtx.threadId ?? replyCtx.channelId;
-    await this.client.sendMessage(targetChannel, text, {
+    const result = await this.client.sendMessage(targetChannel, text, {
       replyTo: replyCtx.replyToMessageId,
     });
+
+    // Track for thought-editing (in case of chained speech)
+    this.lastSentMessage = { channelId: targetChannel, messageId: result.messageId };
 
     // Clear reply-to after sending (don't keep replying to same message)
     replyCtx.replyToMessageId = undefined;
     replyCtx.lastActivity = Date.now();
+  }
+
+  /**
+   * Edit a sent message to prepend thought text as spoilers.
+   */
+  private async editWithThoughts(
+    channelId: string,
+    messageId: string,
+    thoughtText: string
+  ): Promise<void> {
+    // Fetch current message content
+    const currentContent = await this.client.fetchMessage(channelId, messageId);
+    // Prepend spoiler-wrapped thoughts
+    const spoiler = `||${thoughtText}||\n`;
+    await this.client.editMessage(channelId, messageId, spoiler + currentContent);
   }
 
   // ==========================================================================
@@ -565,7 +607,7 @@ export class DiscordModule implements Module {
       console.log(`[Discord] History sync complete: ${totalNew} new, ${totalEdited} edited, ${totalDeleted} deleted`);
 
       // Push a notification event (doesn't trigger inference, just informs)
-      this.ctx.queue.push({
+      this.ctx.pushEvent({
         type: 'module-event',
         source: 'discord',
         eventType: 'history-sync-complete',
@@ -733,7 +775,7 @@ export class DiscordModule implements Module {
     const contentBlocks = await this.convertMessageToContent(message);
 
     // Only queue the event - all state writes happen in onProcess()
-    this.ctx.queue.push({
+    this.ctx.pushEvent({
       type: 'discord:message',
       discordMessageId: message.id,
       channelId: message.channelId,
@@ -858,7 +900,7 @@ export class DiscordModule implements Module {
     if (!this.ctx) return;
 
     // Only queue the event - state writes happen in onProcess()
-    this.ctx.queue.push({
+    this.ctx.pushEvent({
       type: 'discord:edit',
       discordMessageId: messageId,
       newContent,
@@ -869,7 +911,7 @@ export class DiscordModule implements Module {
     if (!this.ctx) return;
 
     // Only queue the event - state writes happen in onProcess()
-    this.ctx.queue.push({
+    this.ctx.pushEvent({
       type: 'discord:delete',
       discordMessageId: messageId,
     });
@@ -888,6 +930,9 @@ export class DiscordModule implements Module {
       replyTo: input.replyTo,
       createThread: input.createThread,
     });
+
+    // Track for thought-editing
+    this.lastSentMessage = { channelId: input.channelId, messageId: result.messageId };
 
     return { success: true, data: { messageId: result.messageId } };
   }
@@ -916,6 +961,9 @@ export class DiscordModule implements Module {
     const result = await this.client.sendMessage(targetChannel, content, {
       replyTo: replyCtx.replyToMessageId,
     });
+
+    // Track for thought-editing
+    this.lastSentMessage = { channelId: targetChannel, messageId: result.messageId };
 
     // Clear reply-to after sending
     replyCtx.replyToMessageId = undefined;

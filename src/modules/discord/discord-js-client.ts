@@ -185,6 +185,15 @@ export class DiscordJsClient implements DiscordClientInterface {
     return { messageId: message.id };
   }
 
+  async fetchMessage(channelId: string, messageId: string): Promise<string> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !('messages' in channel)) {
+      throw new Error(`Channel ${channelId} not found`);
+    }
+    const message = await (channel as TextChannel).messages.fetch(messageId);
+    return message.content;
+  }
+
   async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel || !('messages' in channel)) {

@@ -2,12 +2,31 @@ import type { ContentBlock } from 'membrane';
 import type {
   MessageId,
   MessageMetadata,
-  MessageQuery,
-  MessageQueryResult,
   StoredMessage,
   ContextInjection,
 } from '@connectome/context-manager';
 import type { ProcessEvent, ToolDefinition, ToolCall, ToolResult } from './events.js';
+
+/**
+ * Filter criteria for querying messages.
+ * All fields are optional; messages must match all specified criteria.
+ */
+export interface MessageQuery {
+  /** Filter by external source (e.g., 'discord') */
+  source?: string;
+  /** Filter by participant name */
+  participant?: string;
+  /** Filter by metadata fields (shallow match) */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Result of a message query.
+ */
+export interface MessageQueryResult {
+  messages: StoredMessage[];
+  totalCount: number;
+}
 
 /**
  * A pluggable module that provides capabilities to the framework.
@@ -321,6 +340,13 @@ export interface SpeechContext {
     source: string;
     timestamp: number;
   };
+
+  /**
+   * Pre-tool preamble text blocks that preceded tool calls.
+   * Modules can display these as "thoughts" (e.g. Discord spoiler tags).
+   * Empty when no tool calls were made.
+   */
+  thoughts?: ContentBlock[];
 }
 
 /**

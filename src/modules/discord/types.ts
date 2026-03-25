@@ -413,6 +413,9 @@ export interface DiscordClientInterface {
   /** Send a DM to a user */
   sendDM(userId: string, content: string): Promise<{ messageId: string }>;
 
+  /** Fetch a message's text content */
+  fetchMessage(channelId: string, messageId: string): Promise<string>;
+
   /** Edit a message */
   editMessage(channelId: string, messageId: string, content: string): Promise<void>;
 
