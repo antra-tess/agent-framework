@@ -52,6 +52,10 @@ export type {
 // Note: AgentInfo, MessageEditedEvent, MessageRemovedEvent intentionally not re-exported
 // from api/types.js to avoid conflicts with ./types/index.js
 
+// Billing
+export { BillingTracker } from './billing/index.js';
+export type { SessionUsage, AgentUsage, SessionBillingSnapshot } from './billing/index.js';
+
 // EventGate
 export { EventGate } from './gate/index.js';
 export type { GateConfig, GateOptions, GatePolicy, GatePolicyMatch, GateBehavior } from './gate/index.js';

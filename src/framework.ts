@@ -52,6 +52,8 @@ import { ChannelRegistry } from './mcpl/channel-registry.js';
 import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
 import { EventGate } from './gate/event-gate.js';
+import { BillingTracker } from './billing/billing-tracker.js';
+import type { SessionBillingSnapshot } from './billing/types.js';
 import type { McplServerConnection } from './mcpl/server-connection.js';
 import type {
   McplServerConfig,
@@ -173,6 +175,9 @@ export class AgentFramework {
   // EventGate (null when FrameworkConfig.gate is omitted)
   private eventGate: EventGate | null = null;
 
+  // Session-level token usage tracking (always-on)
+  private billingTracker: BillingTracker;
+
   private constructor(
     store: JsStore,
     ownsStore: boolean,
@@ -192,6 +197,9 @@ export class AgentFramework {
     this.processLoggingPersist = processLoggingPersist;
     this.processLoggingBroadcast = processLoggingBroadcast;
     this.queue = new ProcessQueueImpl();
+    this.billingTracker = new BillingTracker({
+      emitTrace: (e) => this.emitTrace(e as { type: TraceEvent['type']; [key: string]: unknown }),
+    });
 
     // Initialize module registry with callbacks
     this.moduleRegistry = new ModuleRegistry(store, this.queue, {
@@ -528,6 +536,10 @@ export class AgentFramework {
    */
   getMembrane(): Membrane {
     return this.membrane;
+  }
+
+  getSessionUsage(): SessionBillingSnapshot {
+    return this.billingTracker.getSnapshot();
   }
 
   /**
@@ -1838,6 +1850,15 @@ export class AgentFramework {
               tokenUsage,
             });
 
+            if (tokenUsage) {
+              this.billingTracker.onInferenceCompleted(agent.name, {
+                inputTokens: tokenUsage.input,
+                outputTokens: tokenUsage.output,
+                cacheCreationTokens: tokenUsage.cacheCreation,
+                cacheReadTokens: tokenUsage.cacheRead,
+              });
+            }
+
             // Log inference
             this.logInference({
               timestamp: startTime,
@@ -1942,6 +1963,8 @@ export class AgentFramework {
               tokenUsage: {
                 input: event.usage.inputTokens,
                 output: event.usage.outputTokens,
+                cacheCreation: event.usage.cacheCreationTokens,
+                cacheRead: event.usage.cacheReadTokens,
               },
             });
             break;
