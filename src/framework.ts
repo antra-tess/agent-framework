@@ -52,8 +52,8 @@ import { ChannelRegistry } from './mcpl/channel-registry.js';
 import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
 import { EventGate } from './gate/event-gate.js';
-import { BillingTracker } from './billing/billing-tracker.js';
-import type { SessionBillingSnapshot } from './billing/types.js';
+import { UsageTracker } from './usage/usage-tracker.js';
+import type { SessionUsageSnapshot } from './usage/types.js';
 import type { McplServerConnection } from './mcpl/server-connection.js';
 import type {
   McplServerConfig,
@@ -176,7 +176,7 @@ export class AgentFramework {
   private eventGate: EventGate | null = null;
 
   // Session-level token usage tracking (always-on)
-  private billingTracker: BillingTracker;
+  private usageTracker: UsageTracker;
 
   private constructor(
     store: JsStore,
@@ -197,7 +197,7 @@ export class AgentFramework {
     this.processLoggingPersist = processLoggingPersist;
     this.processLoggingBroadcast = processLoggingBroadcast;
     this.queue = new ProcessQueueImpl();
-    this.billingTracker = new BillingTracker({
+    this.usageTracker = new UsageTracker({
       emitTrace: (e) => this.emitTrace(e as { type: TraceEvent['type']; [key: string]: unknown }),
     });
 
@@ -538,8 +538,8 @@ export class AgentFramework {
     return this.membrane;
   }
 
-  getSessionUsage(): SessionBillingSnapshot {
-    return this.billingTracker.getSnapshot();
+  getSessionUsage(): SessionUsageSnapshot {
+    return this.usageTracker.getSnapshot();
   }
 
   /**
@@ -1851,12 +1851,13 @@ export class AgentFramework {
             });
 
             if (tokenUsage) {
-              this.billingTracker.onInferenceCompleted(agent.name, {
+              const cost = response.details?.usage?.estimatedCost;
+              this.usageTracker.onInferenceCompleted(agent.name, {
                 inputTokens: tokenUsage.input,
                 outputTokens: tokenUsage.output,
                 cacheCreationTokens: tokenUsage.cacheCreation,
                 cacheReadTokens: tokenUsage.cacheRead,
-              });
+              }, cost ? { total: cost.total, currency: cost.currency } : undefined);
             }
 
             // Log inference

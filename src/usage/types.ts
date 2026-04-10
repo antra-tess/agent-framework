@@ -3,6 +3,7 @@ export interface SessionUsage {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  estimatedCost?: { total: number; currency: string };
 }
 
 export interface AgentUsage {
@@ -11,7 +12,7 @@ export interface AgentUsage {
   inferenceCount: number;
 }
 
-export interface SessionBillingSnapshot {
+export interface SessionUsageSnapshot {
   totals: SessionUsage;
   byAgent: AgentUsage[];
   inferenceCount: number;

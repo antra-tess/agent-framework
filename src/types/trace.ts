@@ -1,6 +1,6 @@
 import type { ProcessEvent } from './events.js';
 import type { ModuleProcessResponse } from './framework.js';
-import type { SessionUsage } from '../billing/types.js';
+import type { SessionUsage } from '../usage/types.js';
 
 /**
  * Base for all trace events.
@@ -176,9 +176,9 @@ export type TraceEvent =
       policyCount: number;
     })
 
-  // Billing lifecycle
+  // Usage lifecycle
   | (TraceEventBase & {
-      type: 'billing:updated';
+      type: 'usage:updated';
       totals: SessionUsage;
       agentName: string;
       inferenceCount: number;
