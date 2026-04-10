@@ -53,7 +53,7 @@ import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
 import { EventGate } from './gate/event-gate.js';
 import { UsageTracker } from './usage/usage-tracker.js';
-import type { SessionUsageSnapshot } from './usage/types.js';
+import type { SessionUsageSnapshot, UsageUpdatedEvent } from './usage/types.js';
 import type { McplServerConnection } from './mcpl/server-connection.js';
 import type {
   McplServerConfig,
@@ -198,7 +198,7 @@ export class AgentFramework {
     this.processLoggingBroadcast = processLoggingBroadcast;
     this.queue = new ProcessQueueImpl();
     this.usageTracker = new UsageTracker({
-      emitTrace: (e) => this.emitTrace(e as { type: TraceEvent['type']; [key: string]: unknown }),
+      emitTrace: (e: UsageUpdatedEvent) => this.emitTrace({ ...e }),
     });
 
     // Initialize module registry with callbacks
@@ -1835,12 +1835,13 @@ export class AgentFramework {
             const speechContent = hadToolCalls ? [] : allText;
             const thoughts = hadToolCalls ? allText : [];
 
-            const tokenUsage = response.usage
+            const du = response.details?.usage;
+            const tokenUsage = du
               ? {
-                  input: response.usage.inputTokens,
-                  output: response.usage.outputTokens,
-                  cacheCreation: response.details?.usage?.cacheCreationTokens,
-                  cacheRead: response.details?.usage?.cacheReadTokens,
+                  input: du.inputTokens,
+                  output: du.outputTokens,
+                  cacheCreation: du.cacheCreationTokens,
+                  cacheRead: du.cacheReadTokens,
                 }
               : undefined;
             this.emitTrace({
@@ -1850,14 +1851,13 @@ export class AgentFramework {
               tokenUsage,
             });
 
-            if (tokenUsage) {
-              const cost = response.details?.usage?.estimatedCost;
+            if (du) {
               this.usageTracker.onInferenceCompleted(agent.name, {
-                inputTokens: tokenUsage.input,
-                outputTokens: tokenUsage.output,
-                cacheCreationTokens: tokenUsage.cacheCreation,
-                cacheReadTokens: tokenUsage.cacheRead,
-              }, cost ? { total: cost.total, currency: cost.currency } : undefined);
+                inputTokens: du.inputTokens,
+                outputTokens: du.outputTokens,
+                cacheCreationTokens: du.cacheCreationTokens,
+                cacheReadTokens: du.cacheReadTokens,
+              }, du.estimatedCost ? { total: du.estimatedCost.total, currency: du.estimatedCost.currency } : undefined);
             }
 
             // Log inference

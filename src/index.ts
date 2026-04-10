@@ -54,7 +54,7 @@ export type {
 
 // Usage tracking
 export { UsageTracker } from './usage/index.js';
-export type { SessionUsage, AgentUsage, SessionUsageSnapshot } from './usage/index.js';
+export type { SessionUsage, AgentUsage, SessionUsageSnapshot, UsageUpdatedEvent } from './usage/index.js';
 
 // EventGate
 export { EventGate } from './gate/index.js';

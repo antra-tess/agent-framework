@@ -17,3 +17,11 @@ export interface SessionUsageSnapshot {
   byAgent: AgentUsage[];
   inferenceCount: number;
 }
+
+/** Trace event emitted by UsageTracker after each inference completion. */
+export interface UsageUpdatedEvent {
+  type: 'usage:updated';
+  totals: SessionUsage;
+  agentName: string;
+  inferenceCount: number;
+}
