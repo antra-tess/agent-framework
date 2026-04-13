@@ -52,6 +52,8 @@ import { ChannelRegistry } from './mcpl/channel-registry.js';
 import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
 import { EventGate } from './gate/event-gate.js';
+import { UsageTracker } from './usage/usage-tracker.js';
+import type { SessionUsageSnapshot, UsageUpdatedEvent } from './usage/types.js';
 import type { McplServerConnection } from './mcpl/server-connection.js';
 import type {
   McplServerConfig,
@@ -173,6 +175,9 @@ export class AgentFramework {
   // EventGate (null when FrameworkConfig.gate is omitted)
   private eventGate: EventGate | null = null;
 
+  // Session-level token usage tracking (always-on)
+  private usageTracker: UsageTracker;
+
   private constructor(
     store: JsStore,
     ownsStore: boolean,
@@ -192,6 +197,9 @@ export class AgentFramework {
     this.processLoggingPersist = processLoggingPersist;
     this.processLoggingBroadcast = processLoggingBroadcast;
     this.queue = new ProcessQueueImpl();
+    this.usageTracker = new UsageTracker({
+      emitTrace: (e: UsageUpdatedEvent) => this.emitTrace({ ...e }),
+    });
 
     // Initialize module registry with callbacks
     this.moduleRegistry = new ModuleRegistry(store, this.queue, {
@@ -528,6 +536,10 @@ export class AgentFramework {
    */
   getMembrane(): Membrane {
     return this.membrane;
+  }
+
+  getSessionUsage(): SessionUsageSnapshot {
+    return this.usageTracker.getSnapshot();
   }
 
   /**
@@ -1823,12 +1835,13 @@ export class AgentFramework {
             const speechContent = hadToolCalls ? [] : allText;
             const thoughts = hadToolCalls ? allText : [];
 
-            const tokenUsage = response.usage
+            const du = response.details?.usage;
+            const tokenUsage = du
               ? {
-                  input: response.usage.inputTokens,
-                  output: response.usage.outputTokens,
-                  cacheCreation: response.details?.usage?.cacheCreationTokens,
-                  cacheRead: response.details?.usage?.cacheReadTokens,
+                  input: du.inputTokens,
+                  output: du.outputTokens,
+                  cacheCreation: du.cacheCreationTokens,
+                  cacheRead: du.cacheReadTokens,
                 }
               : undefined;
             this.emitTrace({
@@ -1837,6 +1850,15 @@ export class AgentFramework {
               durationMs,
               tokenUsage,
             });
+
+            if (du) {
+              this.usageTracker.onInferenceCompleted(agent.name, {
+                inputTokens: du.inputTokens,
+                outputTokens: du.outputTokens,
+                cacheCreationTokens: du.cacheCreationTokens,
+                cacheReadTokens: du.cacheReadTokens,
+              }, du.estimatedCost ? { total: du.estimatedCost.total, currency: du.estimatedCost.currency } : undefined);
+            }
 
             // Log inference
             this.logInference({
@@ -1942,6 +1964,8 @@ export class AgentFramework {
               tokenUsage: {
                 input: event.usage.inputTokens,
                 output: event.usage.outputTokens,
+                cacheCreation: event.usage.cacheCreationTokens,
+                cacheRead: event.usage.cacheReadTokens,
               },
             });
             break;

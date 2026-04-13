@@ -1,5 +1,6 @@
 import type { ProcessEvent } from './events.js';
 import type { ModuleProcessResponse } from './framework.js';
+import type { SessionUsage } from '../usage/types.js';
 
 /**
  * Base for all trace events.
@@ -75,7 +76,7 @@ export type TraceEvent =
   | (TraceEventBase & {
       type: 'inference:usage';
       agentName: string;
-      tokenUsage: { input: number; output: number };
+      tokenUsage: { input: number; output: number; cacheCreation?: number; cacheRead?: number };
     })
   | (TraceEventBase & {
       type: 'inference:stream_resumed';
@@ -173,6 +174,14 @@ export type TraceEvent =
       type: 'gate:config-reloaded';
       configPath: string;
       policyCount: number;
+    })
+
+  // Usage lifecycle
+  | (TraceEventBase & {
+      type: 'usage:updated';
+      totals: SessionUsage;
+      agentName: string;
+      inferenceCount: number;
     })
 
   // Undo/redo lifecycle
