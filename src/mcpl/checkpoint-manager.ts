@@ -12,7 +12,7 @@
  * Spec reference: Section 8 (State Management).
  */
 
-import type { JsStore } from 'chronicle';
+import type { JsStore } from '@animalabs/chronicle';
 
 import type { StateCheckpoint, JsonPatchOperation } from './types.js';
 

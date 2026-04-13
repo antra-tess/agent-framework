@@ -7,7 +7,7 @@
  * - Tools for explicit Discord operations (send, DM, react, etc.)
  */
 
-import type { ContentBlock } from 'membrane';
+import type { ContentBlock } from '@animalabs/membrane';
 import type {
   Module,
   ModuleContext,

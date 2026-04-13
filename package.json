@@ -1,5 +1,5 @@
 {
-  "name": "@connectome/agent-framework",
+  "name": "@animalabs/agent-framework",
   "version": "0.1.0",
   "description": "Multi-agent framework with pluggable modules, persistent state, and concurrent tool execution",
   "type": "module",
@@ -24,7 +24,8 @@
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "test": "node --test dist/test/*.test.js"
+    "test": "node --test dist/test/*.test.js",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "connectome",
@@ -37,11 +38,11 @@
   "author": "Anima Research",
   "license": "MIT",
   "dependencies": {
-    "@connectome/context-manager": "file:../context-manager",
+    "@animalabs/context-manager": "^0.1.0",
+    "@animalabs/chronicle": "^0.1.0",
+    "@animalabs/membrane": "^0.5.40",
     "chokidar": "^4.0.3",
-    "chronicle": "file:../chronicle",
     "discord.js": "^14.25.1",
-    "membrane": "file:../membrane",
     "ws": "^8.18.0"
   },
   "devDependencies": {

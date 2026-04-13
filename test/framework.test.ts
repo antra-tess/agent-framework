@@ -7,7 +7,7 @@ import assert from 'node:assert';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import type { NormalizedRequest, NormalizedResponse, ContentBlock, YieldingStream, StreamEvent } from 'membrane';
+import type { NormalizedRequest, NormalizedResponse, ContentBlock, YieldingStream, StreamEvent } from '@animalabs/membrane';
 import type {
   Module,
   ModuleContext,
@@ -199,8 +199,8 @@ class MockMembrane implements MinimalMembrane {
   }
 
   // Cast helper - use this when passing to framework
-  asMembrane(): import('membrane').Membrane {
-    return this as unknown as import('membrane').Membrane;
+  asMembrane(): import('@animalabs/membrane').Membrane {
+    return this as unknown as import('@animalabs/membrane').Membrane;
   }
 }
 
@@ -561,7 +561,7 @@ describe('AgentFramework', () => {
 
   it('should share store when provided', async () => {
     // This test verifies that app-owned stores work
-    const { JsStore } = await import('chronicle');
+    const { JsStore } = await import('@animalabs/chronicle');
     const store = JsStore.openOrCreate({ path: join(tempDir, 'shared.chronicle') });
 
     const framework = await AgentFramework.create({

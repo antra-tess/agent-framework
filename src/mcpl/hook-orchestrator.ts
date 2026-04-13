@@ -12,8 +12,8 @@
  * - Loop prevention: rejects inference/request while inside a hook
  */
 
-import type { ContentBlock } from 'membrane';
-import type { ContextInjection } from '@connectome/context-manager';
+import type { ContentBlock } from '@animalabs/membrane';
+import type { ContextInjection } from '@animalabs/context-manager';
 
 import type {
   McplContentBlock,

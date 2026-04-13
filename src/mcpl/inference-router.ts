@@ -8,7 +8,7 @@
  * Spec reference: Section 11 (Server-Initiated Inference).
  */
 
-import type { Membrane, ContentBlock, NormalizedRequest } from 'membrane';
+import type { Membrane, ContentBlock, NormalizedRequest } from '@animalabs/membrane';
 
 import type {
   McplInferenceRequestParams,

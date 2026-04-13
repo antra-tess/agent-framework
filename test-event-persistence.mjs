@@ -2,8 +2,8 @@
  * Test script for event persistence
  */
 
-import { JsStore } from 'chronicle';
-import { Membrane, AnthropicAdapter } from 'membrane';
+import { JsStore } from '@animalabs/chronicle';
+import { Membrane, AnthropicAdapter } from '@animalabs/membrane';
 import { AgentFramework, ApiModule } from './dist/index.js';
 import { rm } from 'fs/promises';
 

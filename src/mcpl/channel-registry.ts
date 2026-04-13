@@ -13,7 +13,7 @@
  * - Build channel context for beforeInference params
  */
 
-import type { ContentBlock } from 'membrane';
+import type { ContentBlock } from '@animalabs/membrane';
 
 import type {
   ChannelDescriptor,

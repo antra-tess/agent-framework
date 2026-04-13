@@ -1,11 +1,11 @@
-import type { Membrane, NormalizedMessage, NormalizedRequest, ContentBlock, YieldingStream } from 'membrane';
-import { isAbortedResponse } from 'membrane';
+import type { Membrane, NormalizedMessage, NormalizedRequest, ContentBlock, YieldingStream } from '@animalabs/membrane';
+import { isAbortedResponse } from '@animalabs/membrane';
 
 export interface StartStreamResult {
   stream: YieldingStream;
   request: NormalizedRequest;
 }
-import type { ContextManager, TokenBudget, ContextInjection, CompileResult } from '@connectome/context-manager';
+import type { ContextManager, TokenBudget, ContextInjection, CompileResult } from '@animalabs/context-manager';
 import type {
   AgentConfig,
   AgentState,

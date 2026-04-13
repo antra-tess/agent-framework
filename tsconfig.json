@@ -17,9 +17,5 @@
     "composite": true
   },
   "include": ["src/**/*", "test/**/*"],
-  "exclude": ["node_modules", "dist"],
-  "references": [
-    { "path": "../membrane" },
-    { "path": "../context-manager" }
-  ]
+  "exclude": ["node_modules", "dist"]
 }

@@ -2,7 +2,7 @@
  * Types for the Discord module
  */
 
-import type { ContentBlock } from 'membrane';
+import type { ContentBlock } from '@animalabs/membrane';
 
 // ============================================================================
 // Module Configuration

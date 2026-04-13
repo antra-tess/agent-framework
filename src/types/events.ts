@@ -1,5 +1,5 @@
-import type { ContentBlock, ToolDefinition as MembraneToolDefinition } from 'membrane';
-import type { MessageId } from '@connectome/context-manager';
+import type { ContentBlock, ToolDefinition as MembraneToolDefinition } from '@animalabs/membrane';
+import type { MessageId } from '@animalabs/context-manager';
 
 /**
  * Unique identifier for a tool call.

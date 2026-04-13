@@ -7,7 +7,7 @@
  * Spec reference: Section 9 (Push Events).
  */
 
-import type { ContentBlock } from 'membrane';
+import type { ContentBlock } from '@animalabs/membrane';
 
 import type {
   McplContentBlock,

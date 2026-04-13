@@ -1,5 +1,5 @@
-import type { JsStore } from 'chronicle';
-import type { Membrane } from 'membrane';
+import type { JsStore } from '@animalabs/chronicle';
+import type { Membrane } from '@animalabs/membrane';
 import type { Module, EventResponse } from './module.js';
 import type { AgentConfig, InferenceRequest } from './agent.js';
 import type { ProcessEvent } from './events.js';

@@ -1,5 +1,5 @@
-import type { ContentBlock, YieldingStream } from 'membrane';
-import type { ContextStrategy } from '@connectome/context-manager';
+import type { ContentBlock, YieldingStream } from '@animalabs/membrane';
+import type { ContextStrategy } from '@animalabs/context-manager';
 import type { ToolCallId, ToolResult, ToolCall } from './events.js';
 
 /**

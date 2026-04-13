@@ -61,7 +61,7 @@ export { EventGate } from './gate/index.js';
 export type { GateConfig, GateOptions, GatePolicy, GatePolicyMatch, GateBehavior } from './gate/index.js';
 
 // Re-export commonly used types from dependencies
-export type { ContextManager, ContextStrategy, TokenBudget } from '@connectome/context-manager';
-export { PassthroughStrategy, AutobiographicalStrategy, KnowledgeStrategy } from '@connectome/context-manager';
-export type { KnowledgeConfig, PhaseType } from '@connectome/context-manager';
-export type { Membrane, NormalizedMessage, NormalizedRequest, ContentBlock } from 'membrane';
+export type { ContextManager, ContextStrategy, TokenBudget } from '@animalabs/context-manager';
+export { PassthroughStrategy, AutobiographicalStrategy, KnowledgeStrategy } from '@animalabs/context-manager';
+export type { KnowledgeConfig, PhaseType } from '@animalabs/context-manager';
+export type { Membrane, NormalizedMessage, NormalizedRequest, ContentBlock } from '@animalabs/membrane';

@@ -8,7 +8,7 @@
  *   npx tsx examples/host-mock.ts
  */
 
-import { Membrane, MockAdapter } from 'membrane';
+import { Membrane, MockAdapter } from '@animalabs/membrane';
 import { AgentFramework, ApiServer, ApiModule } from '../src/index.js';
 
 async function main() {

@@ -2,7 +2,7 @@
  * API types for WebSocket communication with the agent framework
  */
 
-import type { ContentBlock } from 'membrane';
+import type { ContentBlock } from '@animalabs/membrane';
 import type { AgentStatus, ToolCall, ToolResult } from '../types/index.js';
 
 // ============================================================================

@@ -8,7 +8,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
-import type { ContentBlock } from 'membrane';
+import type { ContentBlock } from '@animalabs/membrane';
 import type { AgentFramework } from '../framework.js';
 import type { TraceEvent, ProcessEvent } from '../types/index.js';
 import type {

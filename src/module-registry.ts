@@ -1,5 +1,5 @@
-import type { JsStore } from 'chronicle';
-import type { ContentBlock } from 'membrane';
+import type { JsStore } from '@animalabs/chronicle';
+import type { ContentBlock } from '@animalabs/membrane';
 import type {
   MessageId,
   MessageMetadata,
@@ -7,7 +7,7 @@ import type {
   MessageQueryResult,
   StoredMessage,
   ContextInjection,
-} from '@connectome/context-manager';
+} from '@animalabs/context-manager';
 import type {
   Module,
   ModuleContext,

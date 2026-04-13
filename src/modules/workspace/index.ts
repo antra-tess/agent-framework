@@ -7,7 +7,7 @@
 
 import { readFile, stat, access } from 'node:fs/promises';
 import { join, resolve, relative } from 'node:path';
-import type { JsStore } from 'chronicle';
+import type { JsStore } from '@animalabs/chronicle';
 import type { Module, ModuleContext, ProcessState, EventResponse } from '../../types/module.js';
 import type { ProcessEvent, ToolDefinition, ToolCall, ToolResult } from '../../types/events.js';
 import type {

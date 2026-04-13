@@ -9,7 +9,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, readdir, stat, access } from 'node:fs/promises';
 import { join, dirname, relative, resolve } from 'node:path';
-import type { JsStore, JsTreeEntry } from 'chronicle';
+import type { JsStore, JsTreeEntry } from '@animalabs/chronicle';
 import type { MountState } from './types.js';
 
 export const DEFAULT_MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB

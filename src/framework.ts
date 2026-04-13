@@ -1,14 +1,14 @@
 import { join } from 'node:path';
-import { JsStore } from 'chronicle';
-import type { Membrane, ContentBlock, NormalizedRequest, YieldingStream, ToolResult as MembraneToolResult } from 'membrane';
-import { ContextManager, PassthroughStrategy } from '@connectome/context-manager';
+import { JsStore } from '@animalabs/chronicle';
+import type { Membrane, ContentBlock, NormalizedRequest, YieldingStream, ToolResult as MembraneToolResult } from '@animalabs/membrane';
+import { ContextManager, PassthroughStrategy } from '@animalabs/context-manager';
 import type {
   MessageId,
   MessageMetadata,
   MessageQuery,
   MessageQueryResult,
   StoredMessage,
-} from '@connectome/context-manager';
+} from '@animalabs/context-manager';
 import type {
   FrameworkConfig,
   InferencePolicy,
@@ -69,7 +69,7 @@ import type {
   ChannelsChangedParams,
   ChannelsIncomingParams,
 } from './mcpl/types.js';
-import type { ContextInjection } from '@connectome/context-manager';
+import type { ContextInjection } from '@animalabs/context-manager';
 
 const FRAMEWORK_STATE_ID = 'framework/state';
 const INFERENCE_LOG_ID = 'framework/inference-log';

@@ -5,7 +5,7 @@
  *   npx tsx examples/host.ts
  */
 
-import { Membrane, AnthropicAdapter } from 'membrane';
+import { Membrane, AnthropicAdapter } from '@animalabs/membrane';
 import { AgentFramework, ApiServer, ApiModule } from '../src/index.js';
 
 async function main() {
