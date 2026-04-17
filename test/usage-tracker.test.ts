@@ -103,4 +103,55 @@ describe('UsageTracker', () => {
     assert.equal(traces[0].agentName, 'agent');
     assert.equal(traces[0].inferenceCount, 1);
   });
+
+  it('round-trips through toJSON/restore', () => {
+    const { tracker } = createTracker();
+    tracker.onInferenceCompleted('alice', { inputTokens: 100, outputTokens: 50, cacheCreationTokens: 5, cacheReadTokens: 20 }, { total: 0.01, currency: 'USD' });
+    tracker.onInferenceCompleted('bob', { inputTokens: 200, outputTokens: 75 }, { total: 0.02, currency: 'USD' });
+    tracker.onInferenceCompleted('alice', { inputTokens: 150, outputTokens: 60 }, { total: 0.015, currency: 'USD' });
+
+    const persisted = tracker.toJSON();
+    // Simulate JSON round-trip (as Chronicle does)
+    const restored = new UsageTracker({
+      emitTrace: () => {},
+      restored: JSON.parse(JSON.stringify(persisted)),
+    });
+
+    const snap = restored.getSnapshot();
+    assert.equal(snap.totals.inputTokens, 450);
+    assert.equal(snap.totals.outputTokens, 185);
+    assert.equal(snap.totals.cacheCreationTokens, 5);
+    assert.equal(snap.totals.cacheReadTokens, 20);
+    assert.equal(snap.inferenceCount, 3);
+    assert.ok(snap.totals.estimatedCost);
+    assert.ok(Math.abs(snap.totals.estimatedCost.total - 0.045) < 1e-10);
+    assert.equal(snap.totals.estimatedCost.currency, 'USD');
+
+    assert.equal(snap.byAgent.length, 2);
+    const alice = snap.byAgent.find(a => a.agentName === 'alice')!;
+    assert.equal(alice.usage.inputTokens, 250);
+    assert.equal(alice.inferenceCount, 2);
+
+    const bob = snap.byAgent.find(a => a.agentName === 'bob')!;
+    assert.equal(bob.usage.inputTokens, 200);
+    assert.equal(bob.inferenceCount, 1);
+  });
+
+  it('continues accumulating after restore', () => {
+    const { tracker } = createTracker();
+    tracker.onInferenceCompleted('agent', { inputTokens: 100, outputTokens: 50 }, { total: 0.01, currency: 'USD' });
+
+    const restored = new UsageTracker({
+      emitTrace: () => {},
+      restored: JSON.parse(JSON.stringify(tracker.toJSON())),
+    });
+    restored.onInferenceCompleted('agent', { inputTokens: 200, outputTokens: 75 }, { total: 0.02, currency: 'USD' });
+
+    const snap = restored.getSnapshot();
+    assert.equal(snap.totals.inputTokens, 300);
+    assert.equal(snap.totals.outputTokens, 125);
+    assert.equal(snap.inferenceCount, 2);
+    assert.ok(snap.totals.estimatedCost);
+    assert.ok(Math.abs(snap.totals.estimatedCost.total - 0.03) < 1e-10);
+  });
 });
