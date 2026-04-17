@@ -339,7 +339,7 @@ export class ChannelRegistry {
           textContent,
           {
             ...message.metadata,
-            eventType: 'channel:incoming',
+            eventType: 'mcpl:channel-incoming',
             serverId,
             channelId: message.channelId,
             messageId: message.messageId,

@@ -175,6 +175,15 @@ export type TraceEvent =
       configPath: string;
       policyCount: number;
     })
+  | (TraceEventBase & {
+      type: 'gate:decision';
+      eventType: string;
+      serverId?: string;
+      channelId?: string;
+      matchedPolicy: string | null;
+      trigger: boolean;
+      behavior: string;
+    })
 
   // Usage lifecycle
   | (TraceEventBase & {

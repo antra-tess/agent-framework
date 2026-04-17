@@ -394,9 +394,24 @@ export class EventGate {
     this.reloadIfChanged();
 
     const policy = this.matchPolicy(info);
+    const decision = this.computeDecision(policy, info);
 
+    this.emitTrace({
+      type: 'gate:decision',
+      eventType: info.eventType,
+      serverId: info.serverId || undefined,
+      channelId: info.channelId || undefined,
+      matchedPolicy: decision.policyName,
+      trigger: decision.trigger,
+      behavior: typeof decision.behavior === 'object' ? `debounce:${decision.behavior.debounce}` : decision.behavior,
+      timestamp: Date.now(),
+    });
+
+    return decision;
+  }
+
+  private computeDecision(policy: GatePolicy | null, info: GateEventInfo): GateDecision {
     if (!policy) {
-      // No policy matched — use default
       const trigger = (this.config.default ?? 'always') === 'always';
       return { trigger, policyName: null, behavior: this.config.default ?? 'always' };
     }
@@ -407,7 +422,7 @@ export class EventGate {
     policyStats.lastMatchTimestamp = Date.now();
     this.stats.set(policy.name, policyStats);
 
-    // Emit trace
+    // Legacy trace kept for backward compatibility with existing consumers.
     this.emitTrace({
       type: 'gate:policy-matched',
       policyName: policy.name,
