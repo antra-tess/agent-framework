@@ -52,7 +52,7 @@ import { ChannelRegistry } from './mcpl/channel-registry.js';
 import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
 import { EventGate } from './gate/event-gate.js';
-import { UsageTracker } from './usage/usage-tracker.js';
+import { UsageTracker, type PersistedUsageState } from './usage/usage-tracker.js';
 import type { SessionUsageSnapshot, UsageUpdatedEvent } from './usage/types.js';
 import type { McplServerConnection } from './mcpl/server-connection.js';
 import type {
@@ -283,6 +283,9 @@ export class AgentFramework {
       processLoggingPersist,
       processLoggingBroadcast
     );
+
+    // Restore persisted usage data (if any) from prior session
+    framework.restoreUsageState();
 
     // Create agents
     for (const agentConfig of config.agents) {
@@ -540,6 +543,32 @@ export class AgentFramework {
 
   getSessionUsage(): SessionUsageSnapshot {
     return this.usageTracker.getSnapshot();
+  }
+
+  private restoreUsageState(): void {
+    try {
+      const data = this.store.getStateJson(FRAMEWORK_STATE_ID);
+      if (data && typeof data === 'object' && (data as any).usage) {
+        const restored = (data as any).usage as PersistedUsageState;
+        this.usageTracker = new UsageTracker({
+          emitTrace: (e: UsageUpdatedEvent) => this.emitTrace({ ...e }),
+          restored,
+        });
+      }
+    } catch {
+      // No prior state or corrupt — start fresh (already initialized in constructor)
+    }
+  }
+
+  private persistUsageState(): void {
+    try {
+      const data = this.store.getStateJson(FRAMEWORK_STATE_ID);
+      const state = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+      state.usage = this.usageTracker.toJSON();
+      this.store.setStateJson(FRAMEWORK_STATE_ID, state);
+    } catch {
+      // Non-fatal — usage tracking is best-effort
+    }
   }
 
   /**
@@ -1858,6 +1887,7 @@ export class AgentFramework {
                 cacheCreationTokens: du.cacheCreationTokens,
                 cacheReadTokens: du.cacheReadTokens,
               }, du.estimatedCost ? { total: du.estimatedCost.total, currency: du.estimatedCost.currency } : undefined);
+              this.persistUsageState();
             }
 
             // Log inference

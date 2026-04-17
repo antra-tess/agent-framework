@@ -28,6 +28,27 @@ function accumulateUsage(
   }
 }
 
+function parseUsage(raw: unknown): SessionUsage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.inputTokens !== 'number' || typeof o.outputTokens !== 'number') return null;
+  return {
+    inputTokens: o.inputTokens,
+    outputTokens: o.outputTokens as number,
+    cacheCreationTokens: typeof o.cacheCreationTokens === 'number' ? o.cacheCreationTokens : 0,
+    cacheReadTokens: typeof o.cacheReadTokens === 'number' ? o.cacheReadTokens : 0,
+    estimatedCost: o.estimatedCost && typeof o.estimatedCost === 'object'
+      ? { total: (o.estimatedCost as any).total, currency: (o.estimatedCost as any).currency }
+      : undefined,
+  };
+}
+
+export interface PersistedUsageState {
+  totals: SessionUsage;
+  byAgent: Array<{ agentName: string; usage: SessionUsage; inferenceCount: number }>;
+  inferenceCount: number;
+}
+
 export class UsageTracker {
   private totals: SessionUsage = { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
   private byAgent: Map<string, { usage: SessionUsage; inferenceCount: number }> = new Map();
@@ -36,8 +57,42 @@ export class UsageTracker {
 
   constructor(opts: {
     emitTrace: (event: UsageUpdatedEvent) => void;
+    restored?: PersistedUsageState;
   }) {
     this.emitTrace = opts.emitTrace;
+    if (opts.restored) {
+      this.restoreFrom(opts.restored);
+    }
+  }
+
+  private restoreFrom(state: PersistedUsageState): void {
+    const totals = parseUsage(state.totals);
+    if (!totals) return;
+    this.totals = totals;
+    this.inferenceCount = typeof state.inferenceCount === 'number' ? state.inferenceCount : 0;
+    if (Array.isArray(state.byAgent)) {
+      for (const entry of state.byAgent) {
+        const usage = parseUsage(entry.usage);
+        if (usage && typeof entry.agentName === 'string') {
+          this.byAgent.set(entry.agentName, {
+            usage,
+            inferenceCount: typeof entry.inferenceCount === 'number' ? entry.inferenceCount : 0,
+          });
+        }
+      }
+    }
+  }
+
+  toJSON(): PersistedUsageState {
+    return {
+      totals: snapshotUsage(this.totals),
+      byAgent: [...this.byAgent.entries()].map(([name, data]) => ({
+        agentName: name,
+        usage: snapshotUsage(data.usage),
+        inferenceCount: data.inferenceCount,
+      })),
+      inferenceCount: this.inferenceCount,
+    };
   }
 
   onInferenceCompleted(agentName: string, usage: {
