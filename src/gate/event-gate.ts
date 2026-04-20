@@ -76,6 +76,8 @@ interface CompiledPolicy {
   filterRegex?: RegExp;
   sourceRegex?: RegExp;
   channelRegex?: RegExp;
+  mountRegex?: RegExp;
+  pathRegex?: RegExp;
 }
 
 interface PolicyStats {
@@ -170,6 +172,8 @@ function validatePolicy(raw: unknown): GatePolicy {
     if (Array.isArray(m.scope)) match.scope = m.scope.filter(s => typeof s === 'string');
     if (typeof m.source === 'string') match.source = m.source;
     if (typeof m.channel === 'string') match.channel = m.channel;
+    if (typeof m.mount === 'string') match.mount = m.mount;
+    if (typeof m.pathGlob === 'string') match.pathGlob = m.pathGlob;
     if (m.filter && typeof m.filter === 'object') {
       const f = m.filter as Record<string, unknown>;
       if ((f.type === 'text' || f.type === 'regex') && typeof f.pattern === 'string') {
@@ -286,6 +290,12 @@ export class EventGate {
       if (policy.match.channel) {
         compiled.channelRegex = compileGlob(policy.match.channel);
       }
+      if (policy.match.mount) {
+        compiled.mountRegex = compileGlob(policy.match.mount);
+      }
+      if (policy.match.pathGlob) {
+        compiled.pathRegex = compileGlob(policy.match.pathGlob);
+      }
       return compiled;
     });
   }
@@ -366,6 +376,21 @@ export class EventGate {
     // Channel check
     if (compiled.channelRegex && !compiled.channelRegex.test(info.channelId)) {
       return false;
+    }
+
+    // Mount check (workspace fs events)
+    if (compiled.mountRegex) {
+      if (!info.mount || !compiled.mountRegex.test(info.mount)) {
+        return false;
+      }
+    }
+
+    // Path glob check — matches if ANY path matches
+    if (compiled.pathRegex) {
+      const paths = info.paths;
+      if (!paths || paths.length === 0) return false;
+      const anyMatch = paths.some(p => compiled.pathRegex!.test(p));
+      if (!anyMatch) return false;
     }
 
     // Content filter check

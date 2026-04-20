@@ -25,9 +25,13 @@ import type {
   StatusInput,
   MaterializeInput,
   SyncInput,
-  WorkspaceChangedEvent,
+  WorkspaceCreatedEvent,
+  WorkspaceModifiedEvent,
+  WorkspaceDeletedEvent,
+  WorkspaceFsOp,
 } from './types.js';
-import { MountWatcher } from './watcher.js';
+import { WORKSPACE_FS_EVENT_TYPES, opToEventType } from './types.js';
+import { MountWatcher, type FsChange } from './watcher.js';
 import { syncFromFs, materializeToFs, hashContent, DEFAULT_MAX_FILE_SIZE, type ConflictInfo } from './sync.js';
 
 export type {
@@ -137,8 +141,8 @@ export class WorkspaceModule implements Module {
     for (const [name, mount] of this.mounts) {
       const watchMode = mount.config.watch ?? 'always';
       if (watchMode === 'always') {
-        const watcher = new MountWatcher(mount.config, (paths) => {
-          this.handleFsChanges(name, paths);
+        const watcher = new MountWatcher(mount.config, (changes) => {
+          this.handleFsChanges(name, changes);
         });
         watcher.start();
         this.watchers.set(name, watcher);
@@ -330,8 +334,26 @@ export class WorkspaceModule implements Module {
     }
   }
 
-  async onProcess(_event: ProcessEvent, _state: ProcessState): Promise<EventResponse> {
-    return {};
+  async onProcess(event: ProcessEvent, _state: ProcessState): Promise<EventResponse> {
+    // Wake agents on filesystem events when the originating mount opted in.
+    // The EventGate still has final say — gate policies can further filter by
+    // mount name, path glob, or op type without requiring a recipe change.
+    if (!(WORKSPACE_FS_EVENT_TYPES as readonly string[]).includes(event.type)) {
+      return {};
+    }
+    const mountName = (event as { mount?: string }).mount;
+    if (!mountName) return {};
+    const mount = this.mounts.get(mountName);
+    if (!mount) return {};
+
+    const flag = mount.config.wakeOnChange;
+    if (!flag) return {};
+
+    const op = event.type.slice('workspace:'.length) as WorkspaceFsOp;
+    const opAllowed = flag === true || (Array.isArray(flag) && flag.includes(op));
+    if (!opAllowed) return {};
+
+    return { requestInference: true };
   }
 
   // ==========================================================================
@@ -869,20 +891,12 @@ export class WorkspaceModule implements Module {
       mount.initialSyncDone = true;
 
       if (result.synced.length > 0 || result.conflicts.length > 0) {
-        allResults.push({ mount: name, synced: result.synced, conflicts: result.conflicts });
-
-        // Emit workspace:changed event
-        if (this.ctx) {
-          const event: WorkspaceChangedEvent = {
-            type: 'workspace:changed',
-            paths: result.synced.map(p => `${name}/${p}`),
-            mount: name,
-            conflicts: result.conflicts.length > 0
-              ? result.conflicts.map(c => `${name}/${c.path}`)
-              : undefined,
-          };
-          this.ctx.pushEvent(event as ProcessEvent);
-        }
+        allResults.push({
+          mount: name,
+          synced: result.synced.map(s => s.path),
+          conflicts: result.conflicts,
+        });
+        this.emitFsEvents(name, result.synced, result.conflicts);
       }
     }
 
@@ -902,23 +916,67 @@ export class WorkspaceModule implements Module {
 
   /**
    * Handle filesystem changes detected by watcher (watch: 'always' mode).
+   *
+   * The watcher carries the op per path. For created/modified we call
+   * syncFromFs to pull content into the tree; for deleted we strip the tree
+   * entry directly (the file is gone, nothing to read). We emit one event per
+   * op type.
    */
-  private async handleFsChanges(mountName: string, paths: string[]): Promise<void> {
+  private async handleFsChanges(mountName: string, changes: FsChange[]): Promise<void> {
     const store = this.store;
     const mount = this.mounts.get(mountName);
     if (!store || !mount) return;
 
-    const result = await syncFromFs(store, mount, paths);
+    const touchedPaths = changes.filter(c => c.op !== 'deleted').map(c => c.path);
+    const deletedPaths = changes.filter(c => c.op === 'deleted').map(c => c.path);
 
-    if ((result.synced.length > 0 || result.conflicts.length > 0) && this.ctx) {
-      const event: WorkspaceChangedEvent = {
-        type: 'workspace:changed',
-        paths: result.synced.map(p => `${mountName}/${p}`),
+    const syncResult = touchedPaths.length > 0
+      ? await syncFromFs(store, mount, touchedPaths)
+      : { synced: [], conflicts: [], skipped: [] };
+
+    // Strip deleted entries from the tree so downstream consumers see a
+    // coherent state. syncFromFs would also do this if we passed the paths in,
+    // but the op from the watcher is authoritative — skip the access() probe.
+    for (const p of deletedPaths) {
+      const existing = store.treeGet(mount.treeStateId, p);
+      if (existing) {
+        store.treeRemove(mount.treeStateId, p);
+        syncResult.synced.push({ path: p, op: 'deleted' });
+      }
+    }
+
+    this.emitFsEvents(mountName, syncResult.synced, syncResult.conflicts);
+  }
+
+  /**
+   * Group synced paths by op and push one ProcessEvent per non-empty op.
+   */
+  private emitFsEvents(
+    mountName: string,
+    synced: Array<{ path: string; op: WorkspaceFsOp }>,
+    conflicts: ConflictInfo[],
+  ): void {
+    if (!this.ctx || synced.length === 0) return;
+
+    const byOp = new Map<WorkspaceFsOp, string[]>();
+    for (const { path, op } of synced) {
+      const list = byOp.get(op) ?? [];
+      list.push(`${mountName}/${path}`);
+      byOp.set(op, list);
+    }
+
+    const conflictPaths = conflicts.length > 0
+      ? conflicts.map(c => `${mountName}/${c.path}`)
+      : undefined;
+
+    for (const [op, paths] of byOp) {
+      const type = opToEventType(op);
+      const event = {
+        type,
+        paths,
         mount: mountName,
-        conflicts: result.conflicts.length > 0
-          ? result.conflicts.map(c => `${mountName}/${c.path}`)
-          : undefined,
-      };
+        ...(op !== 'deleted' && conflictPaths ? { conflicts: conflictPaths } : {}),
+      } as WorkspaceCreatedEvent | WorkspaceModifiedEvent | WorkspaceDeletedEvent;
       this.ctx.pushEvent(event as ProcessEvent);
     }
   }

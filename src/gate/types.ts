@@ -30,6 +30,16 @@ export interface GatePolicyMatch {
   channel?: string;
   /** Content text filter. */
   filter?: { type: 'text' | 'regex'; pattern: string };
+  /**
+   * Mount name to match (exact or glob with *). Populated for workspace
+   * filesystem events (workspace:created/modified/deleted).
+   */
+  mount?: string;
+  /**
+   * Glob applied against each path in the event. Matches if ANY path matches.
+   * Supports `*` wildcard; not full gitignore syntax.
+   */
+  pathGlob?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +97,10 @@ export interface GateEventInfo {
   serverId: string;
   channelId: string;
   metadata?: Record<string, unknown>;
+  /** Workspace mount name (for workspace:* events). */
+  mount?: string;
+  /** Mount-prefixed paths touched (for workspace:* events). */
+  paths?: string[];
 }
 
 /** Per-policy runtime statistics (for gate:status). */

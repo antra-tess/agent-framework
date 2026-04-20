@@ -145,6 +145,65 @@ describe('policy matching', () => {
     assert.strictEqual(gate.evaluate(event({ channelId: 'prod-alerts' })).trigger, false);
   });
 
+  it('mount match — exact name', () => {
+    const path = writeConfig('mount-exact.json', {
+      policies: [
+        {
+          name: 'tickets',
+          match: { scope: ['workspace:created'], mount: 'knowledge-requests' },
+          behavior: 'always',
+        },
+      ],
+      default: 'skip',
+    });
+    const { gate } = makeGate(path);
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:created', mount: 'knowledge-requests', paths: ['knowledge-requests/t1.md'] })).trigger,
+      true,
+    );
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:created', mount: 'library-mined', paths: ['library-mined/r1.md'] })).trigger,
+      false,
+    );
+    // Event without a mount must not match a mount-scoped policy.
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:created' })).trigger,
+      false,
+    );
+  });
+
+  it('pathGlob match — any path matches', () => {
+    const path = writeConfig('path-glob.json', {
+      policies: [
+        {
+          name: 'md-only',
+          match: { scope: ['workspace:modified'], pathGlob: '*.md' },
+          behavior: 'always',
+        },
+      ],
+      default: 'skip',
+    });
+    const { gate } = makeGate(path);
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: ['tickets/a.md'] })).trigger,
+      true,
+    );
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: ['logs/a.txt'] })).trigger,
+      false,
+    );
+    // ANY-match: one matching path is enough.
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: ['logs/a.txt', 'tickets/b.md'] })).trigger,
+      true,
+    );
+    // Empty paths can't match a pathGlob policy.
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: [] })).trigger,
+      false,
+    );
+  });
+
   it('content filter — text match (case insensitive)', () => {
     const path = writeConfig('filter-text.json', {
       policies: [
