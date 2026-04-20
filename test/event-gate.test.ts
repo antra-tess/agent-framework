@@ -47,7 +47,7 @@ function makeGate(configPath: string, opts?: { initialConfig?: GateConfig }) {
 function event(overrides?: Partial<GateEventInfo>): GateEventInfo {
   return {
     content: 'test message',
-    eventType: 'push:event',
+    eventType: 'mcpl:push-event',
     serverId: '',
     channelId: '',
     ...overrides,
@@ -99,13 +99,13 @@ describe('policy matching', () => {
   it('scope match — matching event type', () => {
     const path = writeConfig('scope.json', {
       policies: [
-        { name: 'channels', match: { scope: ['channel:incoming'] }, behavior: 'always' },
+        { name: 'channels', match: { scope: ['mcpl:channel-incoming'] }, behavior: 'always' },
       ],
       default: 'skip',
     });
     const { gate } = makeGate(path);
-    assert.strictEqual(gate.evaluate(event({ eventType: 'channel:incoming' })).trigger, true);
-    assert.strictEqual(gate.evaluate(event({ eventType: 'push:event' })).trigger, false);
+    assert.strictEqual(gate.evaluate(event({ eventType: 'mcpl:channel-incoming' })).trigger, true);
+    assert.strictEqual(gate.evaluate(event({ eventType: 'mcpl:push-event' })).trigger, false);
   });
 
   it('source match — exact serverId', () => {
@@ -176,7 +176,7 @@ describe('policy matching', () => {
         {
           name: 'zulip-errors',
           match: {
-            scope: ['channel:incoming'],
+            scope: ['mcpl:channel-incoming'],
             source: 'zulip',
             filter: { type: 'text', pattern: 'error' },
           },
@@ -189,25 +189,25 @@ describe('policy matching', () => {
     // All conditions met
     assert.strictEqual(gate.evaluate(event({
       content: 'An error occurred',
-      eventType: 'channel:incoming',
+      eventType: 'mcpl:channel-incoming',
       serverId: 'zulip',
     })).trigger, true);
     // Wrong scope
     assert.strictEqual(gate.evaluate(event({
       content: 'An error occurred',
-      eventType: 'push:event',
+      eventType: 'mcpl:push-event',
       serverId: 'zulip',
     })).trigger, false);
     // Wrong source
     assert.strictEqual(gate.evaluate(event({
       content: 'An error occurred',
-      eventType: 'channel:incoming',
+      eventType: 'mcpl:channel-incoming',
       serverId: 'discord',
     })).trigger, false);
     // No error keyword
     assert.strictEqual(gate.evaluate(event({
       content: 'All good',
-      eventType: 'channel:incoming',
+      eventType: 'mcpl:channel-incoming',
       serverId: 'zulip',
     })).trigger, false);
   });
@@ -274,7 +274,7 @@ describe('debounce', () => {
   it('returns false immediately', () => {
     const path = writeConfig('debounce.json', {
       policies: [
-        { name: 'editor', match: { scope: ['push:event'] }, behavior: { debounce: 100 } },
+        { name: 'editor', match: { scope: ['mcpl:push-event'] }, behavior: { debounce: 100 } },
       ],
       default: 'skip',
     });
@@ -287,7 +287,7 @@ describe('debounce', () => {
   it('batches events and fires after delay', async () => {
     const path = writeConfig('debounce-fire.json', {
       policies: [
-        { name: 'editor', match: { scope: ['push:event'] }, behavior: { debounce: 150 } },
+        { name: 'editor', match: { scope: ['mcpl:push-event'] }, behavior: { debounce: 150 } },
       ],
       default: 'skip',
     });
@@ -529,15 +529,15 @@ describe('gate:status tool', () => {
     const path = writeConfig('status.json', {
       policies: [
         { name: 'always-policy', match: {}, behavior: 'always' },
-        { name: 'debounce-policy', match: { scope: ['push:event'] }, behavior: { debounce: 1000 } },
+        { name: 'debounce-policy', match: { scope: ['mcpl:push-event'] }, behavior: { debounce: 1000 } },
       ],
       default: 'skip',
     });
     const { gate } = makeGate(path);
 
     // Trigger some matches
-    gate.evaluate(event({ eventType: 'channel:incoming' }));
-    gate.evaluate(event({ eventType: 'channel:incoming' }));
+    gate.evaluate(event({ eventType: 'mcpl:channel-incoming' }));
+    gate.evaluate(event({ eventType: 'mcpl:channel-incoming' }));
 
     const result = await gate.handleToolCall();
     assert.strictEqual(result.success, true);
@@ -568,8 +568,8 @@ describe('asShouldTriggerCallback', () => {
     const cb = gate.asShouldTriggerCallback();
 
     assert.strictEqual(typeof cb, 'function');
-    assert.strictEqual(cb('hello', { eventType: 'push:event', serverId: 'zulip' }), true);
-    assert.strictEqual(cb('hello', { eventType: 'push:event', serverId: 'discord' }), false);
+    assert.strictEqual(cb('hello', { eventType: 'mcpl:push-event', serverId: 'zulip' }), true);
+    assert.strictEqual(cb('hello', { eventType: 'mcpl:push-event', serverId: 'discord' }), false);
   });
 });
 
