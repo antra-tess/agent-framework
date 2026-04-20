@@ -5,8 +5,8 @@
  * auto-sync between real filesystem and Chronicle, and manual materialization.
  */
 
-import { readFile, stat, access } from 'node:fs/promises';
-import { join, resolve, relative } from 'node:path';
+import { readFile, stat, access, writeFile, unlink, mkdir } from 'node:fs/promises';
+import { join, resolve, relative, dirname } from 'node:path';
 import type { JsStore } from '@animalabs/chronicle';
 import type { Module, ModuleContext, ProcessState, EventResponse } from '../../types/module.js';
 import type { ProcessEvent, ToolDefinition, ToolCall, ToolResult } from '../../types/events.js';
@@ -407,6 +407,44 @@ export class WorkspaceModule implements Module {
     return this.store;
   }
 
+  /**
+   * Persist a single write/edit/delete to disk when the mount opts in via
+   * `autoMaterialize`. Required for cross-agent pipelines — another agent's
+   * chokidar watcher on the same directory only sees real filesystem events.
+   * The local watcher's `suppress()` absorbs the echo so we don't self-wake.
+   */
+  private async autoMaterialize(
+    mount: MountState,
+    relativePath: string,
+    op: 'write' | 'delete',
+    content?: Buffer,
+  ): Promise<void> {
+    if (!mount.config.autoMaterialize) return;
+    if (mount.config.mode === 'read-only') return;
+
+    const absolutePath = join(mount.config.path, relativePath);
+    const watcher = this.watchers.get(mount.config.name);
+    watcher?.suppress(relativePath);
+
+    try {
+      if (op === 'write' && content) {
+        await mkdir(dirname(absolutePath), { recursive: true });
+        await writeFile(absolutePath, content);
+        mount.materializedHashes.set(relativePath, hashContent(content));
+      } else if (op === 'delete') {
+        try {
+          await unlink(absolutePath);
+        } catch (err) {
+          // File may already be gone on disk; swallow ENOENT, surface the rest.
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        mount.materializedHashes.delete(relativePath);
+      }
+    } catch (err) {
+      console.warn(`[workspace] autoMaterialize failed for ${mount.config.name}/${relativePath}:`, err);
+    }
+  }
+
   // ==========================================================================
   // Lazy Sync
   // ==========================================================================
@@ -497,12 +535,14 @@ export class WorkspaceModule implements Module {
       return { success: false, error: `Content exceeds max file size (${maxSize} bytes)`, isError: true };
     }
 
-    const blobHash = store.storeBlob(Buffer.from(input.content, 'utf-8'), 'text/plain');
+    const buffer = Buffer.from(input.content, 'utf-8');
+    const blobHash = store.storeBlob(buffer, 'text/plain');
     store.treeSet(mount.treeStateId, relativePath, {
       blobHash,
       size: Buffer.byteLength(input.content),
       mode: 0o644,
     });
+    await this.autoMaterialize(mount, relativePath, 'write', buffer);
 
     return {
       success: true,
@@ -554,12 +594,14 @@ export class WorkspaceModule implements Module {
       ? content.replaceAll(input.oldString, input.newString)
       : content.replace(input.oldString, input.newString);
 
-    const newBlobHash = store.storeBlob(Buffer.from(content, 'utf-8'), 'text/plain');
+    const newBuffer = Buffer.from(content, 'utf-8');
+    const newBlobHash = store.storeBlob(newBuffer, 'text/plain');
     store.treeSet(mount.treeStateId, relativePath, {
       blobHash: newBlobHash,
       size: Buffer.byteLength(content),
       mode: entry.mode,
     });
+    await this.autoMaterialize(mount, relativePath, 'write', newBuffer);
 
     return {
       success: true,
@@ -583,6 +625,7 @@ export class WorkspaceModule implements Module {
     }
 
     store.treeRemove(mount.treeStateId, relativePath);
+    await this.autoMaterialize(mount, relativePath, 'delete');
 
     return { success: true, data: { path: input.path, deleted: true } };
   }

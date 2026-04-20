@@ -47,6 +47,15 @@ export interface MountConfig {
    * filtering or to disable wake temporarily via hot-reload.
    */
   wakeOnChange?: boolean | Array<'created' | 'modified' | 'deleted'>;
+
+  /**
+   * If true, writes/edits/deletes via the module's tools materialize to the
+   * filesystem immediately (not just into Chronicle tree state). Required for
+   * any mount shared across agents as a communication channel — without it,
+   * another agent's watcher on the same directory sees nothing. The watcher
+   * suppresses its own echoes, so this doesn't cause self-wake loops.
+   */
+  autoMaterialize?: boolean;
 }
 
 /**
