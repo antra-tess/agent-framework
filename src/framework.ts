@@ -2451,6 +2451,12 @@ export class AgentFramework {
 
     for (const config of serverConfigs) {
       try {
+        // Record per-server channel subscription policy before the server
+        // registers channels — handleRegister fires during the handshake.
+        if (config.channelSubscription !== undefined && this.channelRegistry) {
+          this.channelRegistry.setSubscriptionPolicy(config.id, config.channelSubscription);
+        }
+
         const connection = await this.mcplServerRegistry.addServer(config, hostCapabilities);
 
         // Wire event listeners then flush any events that arrived during the

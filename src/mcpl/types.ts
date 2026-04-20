@@ -222,6 +222,22 @@ export interface McplServerConfig {
    * Must not collide with any module name or another server's prefix.
    */
   toolPrefix?: string;
+
+  /**
+   * How channels registered by this server are opened.
+   * - `'auto'` (default) — every registered channel is auto-opened; the host
+   *   receives all traffic. Matches prior behavior. Right for agents that
+   *   should listen passively (e.g. a frontdesk clerk).
+   * - `'manual'` — registered channels are listed but not opened. The agent
+   *   must call the `channel_open` tool to start receiving messages. Right
+   *   for focused agents that should not be flooded with chatter from
+   *   servers that advertise many public channels (e.g. Zulip's full stream
+   *   list).
+   * - `string[]` — allow-list of channel ids; only matching channels are
+   *   auto-opened. Ids are server-scoped (the raw id the server registers,
+   *   e.g. `"zulip:tracker-miner-f"`).
+   */
+  channelSubscription?: 'auto' | 'manual' | string[];
 }
 
 // ============================================================================
