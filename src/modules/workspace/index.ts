@@ -89,6 +89,12 @@ export class WorkspaceModule implements Module {
 
   /**
    * Inject the Chronicle store. Must be called after framework creation.
+   *
+   * Host ordering is: `AgentFramework.create()` calls `module.start(ctx)`
+   * before the framework is fully returned, and the host (e.g. conhost) wires
+   * the store via `initStore(store)` afterwards. Neither half has everything
+   * it needs on its own, so watcher setup runs in whichever callback fires
+   * second. `ensureRunning()` gates on `ctx && mounts-populated`.
    */
   initStore(store: JsStore): void {
     this.store = store;
@@ -118,6 +124,8 @@ export class WorkspaceModule implements Module {
       };
       this.mounts.set(mount.name, mountState);
     }
+
+    this.ensureRunning();
   }
 
   async start(ctx: ModuleContext): Promise<void> {
@@ -137,8 +145,20 @@ export class WorkspaceModule implements Module {
       }
     }
 
-    // Start watchers for 'always' mode mounts
+    this.ensureRunning();
+  }
+
+  /**
+   * Start chokidar watchers and emit workspace:mounted events.
+   * Idempotent: safe to call from both start() and initStore(), fires once
+   * per mount regardless of which runs second.
+   */
+  private ensureRunning(): void {
+    if (!this.ctx || this.mounts.size === 0) return;
+
     for (const [name, mount] of this.mounts) {
+      if (this.watchers.has(name)) continue;
+
       const watchMode = mount.config.watch ?? 'always';
       if (watchMode === 'always') {
         const watcher = new MountWatcher(mount.config, (changes) => {
@@ -148,8 +168,7 @@ export class WorkspaceModule implements Module {
         this.watchers.set(name, watcher);
       }
 
-      // Emit mounted event
-      this.ctx?.pushEvent({
+      this.ctx.pushEvent({
         type: 'workspace:mounted',
         mount: name,
         path: mount.config.path,
