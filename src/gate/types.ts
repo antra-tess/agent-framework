@@ -123,4 +123,18 @@ export interface GateStatus {
   default: 'always' | 'skip';
   policies: GatePolicyStats[];
   errors: string[];
+  /** Total events the gate has evaluated since startup. */
+  totalEvaluations: number;
+  /**
+   * Count of events that fell through to `default` (no policy matched),
+   * broken down by whether they triggered or were skipped. Useful for
+   * spotting events that are arriving but silently dropped — if a policy
+   * appears to never fire (matchCount 0) and this count is growing for the
+   * same eventType, the event is reaching the gate but being dropped.
+   */
+  defaultDecisions: {
+    triggered: number;
+    skipped: number;
+    byEventType: Record<string, { triggered: number; skipped: number }>;
+  };
 }

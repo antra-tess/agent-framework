@@ -166,6 +166,14 @@ export class WorkspaceModule implements Module {
         });
         watcher.start();
         this.watchers.set(name, watcher);
+
+        // Chokidar is started with ignoreInitial:true, so files already on
+        // disk at session start would be invisible. Trigger one syncFromFs
+        // pass — syncFromFs diffs disk against the tree state, so only files
+        // new-to-this-session's-tree fire workspace:created events. Fresh
+        // sessions see the existing catalog; restarts only see what appeared
+        // while the session was down.
+        void this.initialScan(name);
       }
 
       this.ctx.pushEvent({
@@ -173,6 +181,20 @@ export class WorkspaceModule implements Module {
         mount: name,
         path: mount.config.path,
       } as ProcessEvent);
+    }
+  }
+
+  private async initialScan(mountName: string): Promise<void> {
+    const store = this.store;
+    const mount = this.mounts.get(mountName);
+    if (!store || !mount) return;
+
+    try {
+      const result = await syncFromFs(store, mount);
+      mount.initialSyncDone = true;
+      this.emitFsEvents(mountName, result.synced, result.conflicts);
+    } catch (err) {
+      console.warn(`[workspace] initial scan failed for ${mountName}:`, err);
     }
   }
 
