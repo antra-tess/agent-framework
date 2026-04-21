@@ -129,9 +129,20 @@ export class MountWatcher {
 
   /**
    * Merge a new op for a path into the pending batch. Chokidar can fire
-   * multiple events per path inside one debounce window (e.g. add+change when
-   * a new file is written in two phases); collapse them to the most meaningful
-   * single op.
+   * multiple events per path inside one debounce window; collapse them to the
+   * single op that reflects the net effect at end-of-window.
+   *
+   * Transitions (prev → op → result):
+   *   ∅          → *         → op
+   *   *          → deleted   → deleted        (trailing delete wins)
+   *   deleted    → created   → modified       (atomic save: unlink+rename;
+   *                                            file exists with new contents)
+   *   created    → modified  → created        (still net-new this window)
+   *   created    → created   → created
+   *   modified   → created   → created        (shouldn't happen, but keep
+   *                                            created to avoid a false
+   *                                            delete->recreate signal)
+   *   modified   → modified  → modified
    */
   private mergeOp(path: string, op: FsOp): void {
     const prev = this.pendingChanges.get(path);
@@ -139,17 +150,19 @@ export class MountWatcher {
       this.pendingChanges.set(path, op);
       return;
     }
-    // delete wins — a file that ended the window deleted was deleted
-    if (op === 'deleted' || prev === 'deleted') {
+    if (op === 'deleted') {
       this.pendingChanges.set(path, 'deleted');
       return;
     }
-    // created + modified → created (net effect: new file)
-    if (prev === 'created' || op === 'created') {
+    if (prev === 'deleted' && op === 'created') {
+      this.pendingChanges.set(path, 'modified');
+      return;
+    }
+    if (prev === 'created') {
       this.pendingChanges.set(path, 'created');
       return;
     }
-    this.pendingChanges.set(path, 'modified');
+    this.pendingChanges.set(path, op);
   }
 
   private scheduleFire(): void {
