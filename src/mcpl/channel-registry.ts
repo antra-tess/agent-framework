@@ -601,6 +601,7 @@ export class ChannelRegistry {
     }
 
     const allowList = Array.isArray(policy) ? new Set(policy) : null;
+    let opened = 0;
 
     for (const channel of channels) {
       if (allowList && !allowList.has(channel.id)) continue;
@@ -615,6 +616,7 @@ export class ChannelRegistry {
         if (entry) {
           entry.open = true;
         }
+        opened++;
       } catch (err) {
         this.emitTraceFn({
           type: 'mcpl:channel-open-failed',
@@ -623,6 +625,18 @@ export class ChannelRegistry {
           error: (err as Error).message,
         });
       }
+    }
+
+    // Surface the common typo failure mode: allow-list set but nothing
+    // matched. Without this trace a one-char typo in a channel id looks
+    // identical to "MCPL didn't register the channel".
+    if (allowList && opened === 0 && channels.length > 0) {
+      this.emitTraceFn({
+        type: 'mcpl:channels-allow-list-empty',
+        serverId,
+        allowList: [...allowList],
+        registered: channels.map(c => c.id),
+      });
     }
   }
 

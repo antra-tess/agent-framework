@@ -123,6 +123,44 @@ class DefaultErrorPolicy implements ErrorPolicy {
 const DEFAULT_SYNC_INTERVAL_MS = 1000;
 
 /**
+ * Extract fields the EventGate cares about from a ProcessEvent. The set of
+ * event variants that carry `content`/`mount`/`paths`/`metadata` is open-ended
+ * (modules can define CustomEvents), so we read by name rather than match the
+ * discriminant. Centralizing this lets new gate-visible fields be added in one
+ * place instead of retyping the narrowing at every call site.
+ */
+function extractGateFields(event: ProcessEvent): {
+  content: string;
+  metadata: Record<string, unknown>;
+  mount?: string;
+  paths?: string[];
+} {
+  const rec = event as unknown as Record<string, unknown>;
+  const rawContent = rec.content;
+  let content = '';
+  if (typeof rawContent === 'string') {
+    content = rawContent;
+  } else if (Array.isArray(rawContent)) {
+    // ContentBlock[] — concatenate text blocks so gate content filters match
+    content = rawContent
+      .filter((b): b is { type: 'text'; text: string } =>
+        !!b && typeof b === 'object' && (b as { type?: unknown }).type === 'text'
+        && typeof (b as { text?: unknown }).text === 'string'
+      )
+      .map(b => b.text)
+      .join('\n');
+  }
+  const metadata = (rec.metadata && typeof rec.metadata === 'object')
+    ? rec.metadata as Record<string, unknown>
+    : {};
+  const mount = typeof rec.mount === 'string' ? rec.mount : undefined;
+  const paths = Array.isArray(rec.paths)
+    ? rec.paths.filter((p): p is string => typeof p === 'string')
+    : undefined;
+  return { content, metadata, mount, paths };
+}
+
+/**
  * The main agent framework.
  */
 export class AgentFramework {
@@ -1463,20 +1501,11 @@ export class AgentFramework {
 
       // Gate non-MCPL events (MCPL events are already gated in PushHandler/ChannelRegistry)
       if (this.eventGate && event.type !== 'mcpl:push-event' && event.type !== 'mcpl:channel-incoming') {
-        const evAny = event as unknown as Record<string, unknown>;
-        const content = 'content' in event ? String(evAny.content) : '';
-        const mount = typeof evAny.mount === 'string' ? evAny.mount : undefined;
-        const paths = Array.isArray(evAny.paths)
-          ? (evAny.paths as unknown[]).filter((p): p is string => typeof p === 'string')
-          : undefined;
         const decision = this.eventGate.evaluate({
-          content,
+          ...extractGateFields(event),
           eventType: event.type,
           serverId: source,
           channelId: '',
-          metadata: 'metadata' in event ? (event as { metadata: Record<string, unknown> }).metadata : {},
-          mount,
-          paths,
         });
         if (!decision.trigger) return;
       }

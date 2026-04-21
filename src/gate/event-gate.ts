@@ -276,7 +276,8 @@ export class EventGate {
           }
         }
       } catch (err) {
-        this.configErrors.push(`Failed to seed/reconcile gate.json: ${err}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        this.configErrors.push(`Failed to seed/reconcile gate.json: ${msg}`);
       }
     }
 

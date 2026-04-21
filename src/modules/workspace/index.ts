@@ -194,7 +194,12 @@ export class WorkspaceModule implements Module {
       mount.initialSyncDone = true;
       this.emitFsEvents(mountName, result.synced, result.conflicts);
     } catch (err) {
-      console.warn(`[workspace] initial scan failed for ${mountName}:`, err);
+      const msg = err instanceof Error ? err.message : String(err);
+      this.ctx?.pushEvent({
+        type: 'workspace:initial-scan-failed',
+        mount: mountName,
+        error: msg,
+      } as ProcessEvent);
     }
   }
 
@@ -434,15 +439,21 @@ export class WorkspaceModule implements Module {
    * `autoMaterialize`. Required for cross-agent pipelines — another agent's
    * chokidar watcher on the same directory only sees real filesystem events.
    * The local watcher's `suppress()` absorbs the echo so we don't self-wake.
+   *
+   * Returns an error string on failure so callers can surface it in the tool
+   * result. The autoMaterialize contract is specifically "disk is the source
+   * of truth for downstream agents", so a silent disk-write failure with a
+   * Chronicle commit would defeat the whole purpose. No-op cases (flag off,
+   * read-only mount) return null (success).
    */
   private async autoMaterialize(
     mount: MountState,
     relativePath: string,
     op: 'write' | 'delete',
     content?: Buffer,
-  ): Promise<void> {
-    if (!mount.config.autoMaterialize) return;
-    if (mount.config.mode === 'read-only') return;
+  ): Promise<string | null> {
+    if (!mount.config.autoMaterialize) return null;
+    if (mount.config.mode === 'read-only') return null;
 
     const absolutePath = join(mount.config.path, relativePath);
     const watcher = this.watchers.get(mount.config.name);
@@ -457,13 +468,21 @@ export class WorkspaceModule implements Module {
         try {
           await unlink(absolutePath);
         } catch (err) {
-          // File may already be gone on disk; swallow ENOENT, surface the rest.
           if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
         }
         mount.materializedHashes.delete(relativePath);
       }
+      return null;
     } catch (err) {
-      console.warn(`[workspace] autoMaterialize failed for ${mount.config.name}/${relativePath}:`, err);
+      const msg = err instanceof Error ? err.message : String(err);
+      this.ctx?.pushEvent({
+        type: 'workspace:materialize-failed',
+        mount: mount.config.name,
+        path: relativePath,
+        op,
+        error: msg,
+      } as ProcessEvent);
+      return msg;
     }
   }
 
@@ -564,7 +583,14 @@ export class WorkspaceModule implements Module {
       size: Buffer.byteLength(input.content),
       mode: 0o644,
     });
-    await this.autoMaterialize(mount, relativePath, 'write', buffer);
+    const materializeError = await this.autoMaterialize(mount, relativePath, 'write', buffer);
+    if (materializeError) {
+      return {
+        success: false,
+        error: `Wrote to Chronicle but failed to materialize "${input.path}" to disk: ${materializeError}. Downstream agents will not see this change until the next materialize call.`,
+        isError: true,
+      };
+    }
 
     return {
       success: true,
@@ -623,7 +649,14 @@ export class WorkspaceModule implements Module {
       size: Buffer.byteLength(content),
       mode: entry.mode,
     });
-    await this.autoMaterialize(mount, relativePath, 'write', newBuffer);
+    const materializeError = await this.autoMaterialize(mount, relativePath, 'write', newBuffer);
+    if (materializeError) {
+      return {
+        success: false,
+        error: `Edited Chronicle but failed to materialize "${input.path}" to disk: ${materializeError}. Downstream agents will not see this change until the next materialize call.`,
+        isError: true,
+      };
+    }
 
     return {
       success: true,
@@ -647,7 +680,14 @@ export class WorkspaceModule implements Module {
     }
 
     store.treeRemove(mount.treeStateId, relativePath);
-    await this.autoMaterialize(mount, relativePath, 'delete');
+    const materializeError = await this.autoMaterialize(mount, relativePath, 'delete');
+    if (materializeError) {
+      return {
+        success: false,
+        error: `Removed from Chronicle but failed to unlink "${input.path}" from disk: ${materializeError}. Downstream agents will still see the stale file until manual cleanup.`,
+        isError: true,
+      };
+    }
 
     return { success: true, data: { path: input.path, deleted: true } };
   }
@@ -1049,17 +1089,26 @@ export class WorkspaceModule implements Module {
       byOp.set(op, list);
     }
 
-    const conflictPaths = conflicts.length > 0
-      ? conflicts.map(c => `${mountName}/${c.path}`)
-      : undefined;
+    // Conflicts by definition require a prior tree entry (sync detected that
+    // the agent-side version diverged from the filesystem baseline), which
+    // means the path is being re-synced as a modification. Attach conflicts
+    // only to the workspace:modified event, intersected with its paths — a
+    // created/deleted batch can't carry a meaningful conflict.
+    const conflictsByPath = new Map<string, ConflictInfo>();
+    for (const c of conflicts) conflictsByPath.set(c.path, c);
 
     for (const [op, paths] of byOp) {
       const type = opToEventType(op);
+      let eventConflicts: string[] | undefined;
+      if (op === 'modified' && conflictsByPath.size > 0) {
+        const matched = paths.filter(p => conflictsByPath.has(p.slice(mountName.length + 1)));
+        if (matched.length > 0) eventConflicts = matched;
+      }
       const event = {
         type,
         paths,
         mount: mountName,
-        ...(op !== 'deleted' && conflictPaths ? { conflicts: conflictPaths } : {}),
+        ...(eventConflicts ? { conflicts: eventConflicts } : {}),
       } as WorkspaceCreatedEvent | WorkspaceModifiedEvent | WorkspaceDeletedEvent;
       this.ctx.pushEvent(event as ProcessEvent);
     }
