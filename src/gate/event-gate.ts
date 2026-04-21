@@ -76,6 +76,8 @@ interface CompiledPolicy {
   filterRegex?: RegExp;
   sourceRegex?: RegExp;
   channelRegex?: RegExp;
+  mountRegex?: RegExp;
+  pathRegex?: RegExp;
 }
 
 interface PolicyStats {
@@ -170,6 +172,8 @@ function validatePolicy(raw: unknown): GatePolicy {
     if (Array.isArray(m.scope)) match.scope = m.scope.filter(s => typeof s === 'string');
     if (typeof m.source === 'string') match.source = m.source;
     if (typeof m.channel === 'string') match.channel = m.channel;
+    if (typeof m.mount === 'string') match.mount = m.mount;
+    if (typeof m.pathGlob === 'string') match.pathGlob = m.pathGlob;
     if (m.filter && typeof m.filter === 'object') {
       const f = m.filter as Record<string, unknown>;
       if ((f.type === 'text' || f.type === 'regex') && typeof f.pattern === 'string') {
@@ -210,6 +214,12 @@ export class EventGate {
   // Per-policy stats
   private stats = new Map<string, PolicyStats>();
 
+  // Observability counters for events that didn't match any policy
+  private totalEvaluations = 0;
+  private defaultTriggered = 0;
+  private defaultSkipped = 0;
+  private defaultByEventType = new Map<string, { triggered: number; skipped: number }>();
+
   // Dependency-injected callbacks
   private emitTrace: (event: TraceEventLike) => void;
   private addMessageFn: (participant: string, content: Array<{ type: 'text'; text: string }>, metadata?: Record<string, unknown>) => unknown;
@@ -230,13 +240,43 @@ export class EventGate {
     this.requestInferenceFn = opts.requestInference;
     this.getAgentNamesFn = opts.getAgentNames;
 
-    // Seed config file if it doesn't exist
-    if (opts.initialConfig && !existsSync(this.configPath)) {
+    // Seed or reconcile the on-disk config.
+    //
+    // First start: write `initialConfig` verbatim.
+    // Subsequent starts: if the recipe/config source declares policies that
+    // aren't yet in gate.json (e.g. the user edited the recipe between
+    // sessions), append them by name. Existing policies are left alone so
+    // user edits via `workspace--edit _config/gate.json` survive.
+    // The `default` field is not reconciled — it's an explicit operator
+    // choice and a recipe change shouldn't silently flip live wake
+    // behavior for a session that's already been running.
+    if (opts.initialConfig) {
       try {
         mkdirSync(dirname(this.configPath), { recursive: true });
-        writeFileSync(this.configPath, JSON.stringify(opts.initialConfig, null, 2) + '\n');
+        if (!existsSync(this.configPath)) {
+          writeFileSync(this.configPath, JSON.stringify(opts.initialConfig, null, 2) + '\n');
+        } else {
+          const existing = this.loadConfig();
+          if (existing) {
+            const existingNames = new Set(existing.policies.map(p => p.name));
+            const missing = opts.initialConfig.policies.filter(p => !existingNames.has(p.name));
+            if (missing.length > 0) {
+              const reconciled: GateConfig = {
+                ...existing,
+                policies: [...existing.policies, ...missing],
+              };
+              writeFileSync(this.configPath, JSON.stringify(reconciled, null, 2) + '\n');
+              opts.emitTrace({
+                type: 'gate:config-reconciled',
+                configPath: this.configPath,
+                addedPolicies: missing.map(p => p.name),
+                timestamp: Date.now(),
+              });
+            }
+          }
+        }
       } catch (err) {
-        this.configErrors.push(`Failed to seed gate.json: ${err}`);
+        this.configErrors.push(`Failed to seed/reconcile gate.json: ${err}`);
       }
     }
 
@@ -285,6 +325,12 @@ export class EventGate {
       }
       if (policy.match.channel) {
         compiled.channelRegex = compileGlob(policy.match.channel);
+      }
+      if (policy.match.mount) {
+        compiled.mountRegex = compileGlob(policy.match.mount);
+      }
+      if (policy.match.pathGlob) {
+        compiled.pathRegex = compileGlob(policy.match.pathGlob);
       }
       return compiled;
     });
@@ -368,6 +414,21 @@ export class EventGate {
       return false;
     }
 
+    // Mount check (workspace fs events)
+    if (compiled.mountRegex) {
+      if (!info.mount || !compiled.mountRegex.test(info.mount)) {
+        return false;
+      }
+    }
+
+    // Path glob check — matches if ANY path matches
+    if (compiled.pathRegex) {
+      const paths = info.paths;
+      if (!paths || paths.length === 0) return false;
+      const anyMatch = paths.some(p => compiled.pathRegex!.test(p));
+      if (!anyMatch) return false;
+    }
+
     // Content filter check
     if (match.filter) {
       if (match.filter.type === 'text') {
@@ -395,6 +456,20 @@ export class EventGate {
 
     const policy = this.matchPolicy(info);
     const decision = this.computeDecision(policy, info);
+
+    this.totalEvaluations++;
+    if (!policy) {
+      const bucket = this.defaultByEventType.get(info.eventType)
+        ?? { triggered: 0, skipped: 0 };
+      if (decision.trigger) {
+        this.defaultTriggered++;
+        bucket.triggered++;
+      } else {
+        this.defaultSkipped++;
+        bucket.skipped++;
+      }
+      this.defaultByEventType.set(info.eventType, bucket);
+    }
 
     this.emitTrace({
       type: 'gate:decision',
@@ -614,6 +689,9 @@ export class EventGate {
       return result;
     });
 
+    const byEventType: Record<string, { triggered: number; skipped: number }> = {};
+    for (const [k, v] of this.defaultByEventType) byEventType[k] = { ...v };
+
     return {
       configPath: this.configPath,
       configSource: this.configSource,
@@ -621,6 +699,12 @@ export class EventGate {
       default: this.config.default ?? 'always',
       policies,
       errors: [...this.configErrors],
+      totalEvaluations: this.totalEvaluations,
+      defaultDecisions: {
+        triggered: this.defaultTriggered,
+        skipped: this.defaultSkipped,
+        byEventType,
+      },
     };
   }
 

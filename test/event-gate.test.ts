@@ -145,6 +145,65 @@ describe('policy matching', () => {
     assert.strictEqual(gate.evaluate(event({ channelId: 'prod-alerts' })).trigger, false);
   });
 
+  it('mount match — exact name', () => {
+    const path = writeConfig('mount-exact.json', {
+      policies: [
+        {
+          name: 'tickets',
+          match: { scope: ['workspace:created'], mount: 'knowledge-requests' },
+          behavior: 'always',
+        },
+      ],
+      default: 'skip',
+    });
+    const { gate } = makeGate(path);
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:created', mount: 'knowledge-requests', paths: ['knowledge-requests/t1.md'] })).trigger,
+      true,
+    );
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:created', mount: 'library-mined', paths: ['library-mined/r1.md'] })).trigger,
+      false,
+    );
+    // Event without a mount must not match a mount-scoped policy.
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:created' })).trigger,
+      false,
+    );
+  });
+
+  it('pathGlob match — any path matches', () => {
+    const path = writeConfig('path-glob.json', {
+      policies: [
+        {
+          name: 'md-only',
+          match: { scope: ['workspace:modified'], pathGlob: '*.md' },
+          behavior: 'always',
+        },
+      ],
+      default: 'skip',
+    });
+    const { gate } = makeGate(path);
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: ['tickets/a.md'] })).trigger,
+      true,
+    );
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: ['logs/a.txt'] })).trigger,
+      false,
+    );
+    // ANY-match: one matching path is enough.
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: ['logs/a.txt', 'tickets/b.md'] })).trigger,
+      true,
+    );
+    // Empty paths can't match a pathGlob policy.
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:modified', paths: [] })).trigger,
+      false,
+    );
+  });
+
   it('content filter — text match (case insensitive)', () => {
     const path = writeConfig('filter-text.json', {
       policies: [
@@ -625,5 +684,104 @@ describe('dispose', () => {
 
     // No delivery should happen
     assert.strictEqual(messages.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Policy reconciliation on restart (postmortem: clerk stuck on old policies)
+// ---------------------------------------------------------------------------
+
+describe('policy reconciliation', () => {
+  it('appends missing-by-name policies from initialConfig when gate.json already exists', () => {
+    // Simulate a prior session that seeded gate.json with 2 policies
+    const path = writeConfig('reconcile-add.json', {
+      default: 'skip',
+      policies: [
+        { name: 'user-input', match: { scope: ['external-message'] }, behavior: 'always' },
+        { name: 'subagent-completions', match: { scope: ['inference-request'] }, behavior: 'always' },
+      ],
+    });
+
+    // New session starts with a recipe that added a third policy
+    const { gate, traces } = makeGate(path, {
+      initialConfig: {
+        default: 'skip',
+        policies: [
+          { name: 'user-input', match: { scope: ['external-message'] }, behavior: 'always' },
+          { name: 'subagent-completions', match: { scope: ['inference-request'] }, behavior: 'always' },
+          { name: 'reviewed-responses', match: { scope: ['workspace:created'] }, behavior: 'always' },
+        ],
+      },
+    });
+
+    // gate.json on disk should now contain all three policies
+    const onDisk = JSON.parse(readFileSync(path, 'utf-8'));
+    assert.strictEqual(onDisk.policies.length, 3);
+    assert.ok(onDisk.policies.some((p: { name: string }) => p.name === 'reviewed-responses'));
+
+    // Reconciliation trace emitted
+    assert.ok(traces.some(t => t.type === 'gate:config-reconciled'));
+
+    // Live gate honors the new policy
+    assert.strictEqual(
+      gate.evaluate(event({ eventType: 'workspace:created' })).trigger,
+      true,
+    );
+  });
+
+  it("leaves existing policies alone — user's workspace--edit survives recipe changes", () => {
+    const path = writeConfig('reconcile-preserve.json', {
+      default: 'skip',
+      policies: [
+        {
+          name: 'user-input',
+          // User edited this policy to also filter on content
+          match: { scope: ['external-message'], filter: { type: 'text', pattern: 'urgent' } },
+          behavior: 'always',
+        },
+      ],
+    });
+
+    makeGate(path, {
+      initialConfig: {
+        default: 'skip',
+        policies: [
+          // Recipe declares it without the filter
+          { name: 'user-input', match: { scope: ['external-message'] }, behavior: 'always' },
+        ],
+      },
+    });
+
+    const onDisk = JSON.parse(readFileSync(path, 'utf-8'));
+    assert.strictEqual(onDisk.policies.length, 1);
+    assert.deepStrictEqual(onDisk.policies[0].match.filter, { type: 'text', pattern: 'urgent' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Observability: defaultDecisions counts help diagnose silent drops
+// ---------------------------------------------------------------------------
+
+describe('defaultDecisions counters', () => {
+  it('counts events that fell through to default (by eventType)', () => {
+    const path = writeConfig('default-counts.json', {
+      default: 'skip',
+      policies: [
+        { name: 'user-input', match: { scope: ['external-message'] }, behavior: 'always' },
+      ],
+    });
+    const { gate } = makeGate(path);
+
+    gate.evaluate(event({ eventType: 'external-message' })); // matches
+    gate.evaluate(event({ eventType: 'workspace:created' })); // default skip
+    gate.evaluate(event({ eventType: 'workspace:created' })); // default skip
+    gate.evaluate(event({ eventType: 'other' })); // default skip
+
+    const status = gate.getStatus();
+    assert.strictEqual(status.totalEvaluations, 4);
+    assert.strictEqual(status.defaultDecisions.skipped, 3);
+    assert.strictEqual(status.defaultDecisions.triggered, 0);
+    assert.strictEqual(status.defaultDecisions.byEventType['workspace:created'].skipped, 2);
+    assert.strictEqual(status.defaultDecisions.byEventType['other'].skipped, 1);
   });
 });

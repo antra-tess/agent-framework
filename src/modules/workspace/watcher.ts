@@ -1,12 +1,22 @@
 /**
  * Filesystem watcher with debounce, ignore patterns, and suppression.
+ *
+ * Events are carried through with their op type (created/modified/deleted) so
+ * downstream wake policies can key on creation vs. modification vs. deletion.
  */
 
 import { watch, type FSWatcher } from 'chokidar';
 import { type MountConfig } from './types.js';
 
+export type FsOp = 'created' | 'modified' | 'deleted';
+
+export interface FsChange {
+  path: string;
+  op: FsOp;
+}
+
 export interface WatcherEvents {
-  onChange(paths: string[]): void;
+  onChange(changes: FsChange[]): void;
 }
 
 /**
@@ -15,17 +25,19 @@ export interface WatcherEvents {
  */
 export class MountWatcher {
   private watcher: FSWatcher | null = null;
-  private pendingChanges = new Set<string>();
+  // Most recent op seen per path within the current debounce window.
+  // create -> modify collapses to 'created' (single batch); delete always wins.
+  private pendingChanges = new Map<string, FsOp>();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressedPaths = new Set<string>();
   private suppressionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly debounceMs: number;
   private readonly config: MountConfig;
-  private readonly onChangeCallback: (paths: string[]) => void;
+  private readonly onChangeCallback: (changes: FsChange[]) => void;
 
   constructor(
     config: MountConfig,
-    onChange: (paths: string[]) => void,
+    onChange: (changes: FsChange[]) => void,
   ) {
     this.config = config;
     this.debounceMs = config.watchDebounceMs ?? 300;
@@ -51,21 +63,22 @@ export class MountWatcher {
       },
     });
 
-    const handleEvent = (filePath: string) => {
-      // Convert absolute path to mount-relative
+    const handleEvent = (op: FsOp) => (filePath: string) => {
       const relative = this.toRelative(filePath);
       if (!relative) return;
 
-      // Skip if this path is suppressed (we just wrote it)
+      // Skip if this path is suppressed (we just wrote it).
+      // Suppression covers all ops — a materialize-then-delete by the module
+      // should not echo either the add or the unlink.
       if (this.suppressedPaths.has(relative)) return;
 
-      this.pendingChanges.add(relative);
+      this.mergeOp(relative, op);
       this.scheduleFire();
     };
 
-    this.watcher.on('add', handleEvent);
-    this.watcher.on('change', handleEvent);
-    this.watcher.on('unlink', handleEvent);
+    this.watcher.on('add', handleEvent('created'));
+    this.watcher.on('change', handleEvent('modified'));
+    this.watcher.on('unlink', handleEvent('deleted'));
   }
 
   /**
@@ -92,12 +105,10 @@ export class MountWatcher {
   /**
    * Suppress watcher events for a path temporarily.
    * Used after materializing to avoid echo events.
-   * After the cooldown, the path is re-checked via the recheckCallback.
    */
   suppress(relativePath: string, cooldownMs = 500): void {
     this.suppressedPaths.add(relativePath);
 
-    // Clear existing timer for this path
     const existing = this.suppressionTimers.get(relativePath);
     if (existing) clearTimeout(existing);
 
@@ -116,6 +127,31 @@ export class MountWatcher {
     return this.suppressedPaths.has(relativePath);
   }
 
+  /**
+   * Merge a new op for a path into the pending batch. Chokidar can fire
+   * multiple events per path inside one debounce window (e.g. add+change when
+   * a new file is written in two phases); collapse them to the most meaningful
+   * single op.
+   */
+  private mergeOp(path: string, op: FsOp): void {
+    const prev = this.pendingChanges.get(path);
+    if (!prev) {
+      this.pendingChanges.set(path, op);
+      return;
+    }
+    // delete wins — a file that ended the window deleted was deleted
+    if (op === 'deleted' || prev === 'deleted') {
+      this.pendingChanges.set(path, 'deleted');
+      return;
+    }
+    // created + modified → created (net effect: new file)
+    if (prev === 'created' || op === 'created') {
+      this.pendingChanges.set(path, 'created');
+      return;
+    }
+    this.pendingChanges.set(path, 'modified');
+  }
+
   private scheduleFire(): void {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
@@ -123,9 +159,9 @@ export class MountWatcher {
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null;
       if (this.pendingChanges.size > 0) {
-        const paths = [...this.pendingChanges];
+        const changes: FsChange[] = [...this.pendingChanges].map(([path, op]) => ({ path, op }));
         this.pendingChanges.clear();
-        this.onChangeCallback(paths);
+        this.onChangeCallback(changes);
       }
     }, this.debounceMs);
   }

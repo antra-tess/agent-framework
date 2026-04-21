@@ -195,6 +195,13 @@ export class ChannelRegistry {
   /** Per-channel typing indicator timers. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
+  /**
+   * Per-server channel auto-open policy. Populated by the framework from
+   * each McplServerConfig at connect time; default ('auto') applies when
+   * unset.
+   */
+  private subscriptionPolicies = new Map<string, 'auto' | 'manual' | string[]>();
+
   constructor(
     serverRegistry: McplServerRegistry,
     featureSetManager: FeatureSetManager,
@@ -210,6 +217,14 @@ export class ChannelRegistry {
     this.emitTraceFn = emitTraceFn;
     this.sendTypingFn = options?.sendTypingFn;
     this.shouldTriggerInference = options?.shouldTriggerInference;
+  }
+
+  /**
+   * Set the channel auto-open policy for a server. Called by the framework
+   * when each MCPL server is registered.
+   */
+  setSubscriptionPolicy(serverId: string, policy: 'auto' | 'manual' | string[]): void {
+    this.subscriptionPolicies.set(serverId, policy);
   }
 
   // ==========================================================================
@@ -574,7 +589,22 @@ export class ChannelRegistry {
     const server = this.serverRegistry.getServer(serverId);
     if (!server) return;
 
+    const policy = this.subscriptionPolicies.get(serverId) ?? 'auto';
+    if (policy === 'manual') {
+      this.emitTraceFn({
+        type: 'mcpl:channels-auto-open-skipped',
+        serverId,
+        reason: 'manual',
+        count: channels.length,
+      });
+      return;
+    }
+
+    const allowList = Array.isArray(policy) ? new Set(policy) : null;
+
     for (const channel of channels) {
+      if (allowList && !allowList.has(channel.id)) continue;
+
       const key = `${serverId}:${channel.id}`;
       try {
         await server.sendChannelsOpen({

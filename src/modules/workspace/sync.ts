@@ -56,9 +56,16 @@ export interface ConflictInfo {
   agentBlobHash: string;
 }
 
+export type SyncOp = 'created' | 'modified' | 'deleted';
+
+export interface SyncedPath {
+  path: string;
+  op: SyncOp;
+}
+
 export interface SyncResult {
-  /** Paths that were synced */
-  synced: string[];
+  /** Paths that were synced, tagged with the op detected against tree state */
+  synced: SyncedPath[];
   /** Paths that conflicted (both agent and user modified) — filesystem wins */
   conflicts: ConflictInfo[];
   /** Paths that were skipped (binary, too large, etc.) */
@@ -97,7 +104,7 @@ export async function syncFromFs(
       const existing = store.treeGet(mount.treeStateId, relativePath);
       if (existing) {
         store.treeRemove(mount.treeStateId, relativePath);
-        result.synced.push(relativePath);
+        result.synced.push({ path: relativePath, op: 'deleted' });
       }
       continue;
     }
@@ -151,7 +158,7 @@ export async function syncFromFs(
       }
 
       store.treeSet(mount.treeStateId, relativePath, entry);
-      result.synced.push(relativePath);
+      result.synced.push({ path: relativePath, op: existing ? 'modified' : 'created' });
     } catch {
       result.skipped.push(relativePath);
     }

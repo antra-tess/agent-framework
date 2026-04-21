@@ -1463,13 +1463,20 @@ export class AgentFramework {
 
       // Gate non-MCPL events (MCPL events are already gated in PushHandler/ChannelRegistry)
       if (this.eventGate && event.type !== 'mcpl:push-event' && event.type !== 'mcpl:channel-incoming') {
-        const content = 'content' in event ? String((event as { content: unknown }).content) : '';
+        const evAny = event as unknown as Record<string, unknown>;
+        const content = 'content' in event ? String(evAny.content) : '';
+        const mount = typeof evAny.mount === 'string' ? evAny.mount : undefined;
+        const paths = Array.isArray(evAny.paths)
+          ? (evAny.paths as unknown[]).filter((p): p is string => typeof p === 'string')
+          : undefined;
         const decision = this.eventGate.evaluate({
           content,
           eventType: event.type,
           serverId: source,
           channelId: '',
           metadata: 'metadata' in event ? (event as { metadata: Record<string, unknown> }).metadata : {},
+          mount,
+          paths,
         });
         if (!decision.trigger) return;
       }
@@ -2444,6 +2451,12 @@ export class AgentFramework {
 
     for (const config of serverConfigs) {
       try {
+        // Record per-server channel subscription policy before the server
+        // registers channels — handleRegister fires during the handshake.
+        if (config.channelSubscription !== undefined && this.channelRegistry) {
+          this.channelRegistry.setSubscriptionPolicy(config.id, config.channelSubscription);
+        }
+
         const connection = await this.mcplServerRegistry.addServer(config, hostCapabilities);
 
         // Wire event listeners then flush any events that arrived during the

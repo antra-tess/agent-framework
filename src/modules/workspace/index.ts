@@ -5,8 +5,8 @@
  * auto-sync between real filesystem and Chronicle, and manual materialization.
  */
 
-import { readFile, stat, access } from 'node:fs/promises';
-import { join, resolve, relative } from 'node:path';
+import { readFile, stat, access, writeFile, unlink, mkdir } from 'node:fs/promises';
+import { join, resolve, relative, dirname } from 'node:path';
 import type { JsStore } from '@animalabs/chronicle';
 import type { Module, ModuleContext, ProcessState, EventResponse } from '../../types/module.js';
 import type { ProcessEvent, ToolDefinition, ToolCall, ToolResult } from '../../types/events.js';
@@ -25,9 +25,13 @@ import type {
   StatusInput,
   MaterializeInput,
   SyncInput,
-  WorkspaceChangedEvent,
+  WorkspaceCreatedEvent,
+  WorkspaceModifiedEvent,
+  WorkspaceDeletedEvent,
+  WorkspaceFsOp,
 } from './types.js';
-import { MountWatcher } from './watcher.js';
+import { WORKSPACE_FS_EVENT_TYPES, opToEventType } from './types.js';
+import { MountWatcher, type FsChange } from './watcher.js';
 import { syncFromFs, materializeToFs, hashContent, DEFAULT_MAX_FILE_SIZE, type ConflictInfo } from './sync.js';
 
 export type {
@@ -85,6 +89,12 @@ export class WorkspaceModule implements Module {
 
   /**
    * Inject the Chronicle store. Must be called after framework creation.
+   *
+   * Host ordering is: `AgentFramework.create()` calls `module.start(ctx)`
+   * before the framework is fully returned, and the host (e.g. conhost) wires
+   * the store via `initStore(store)` afterwards. Neither half has everything
+   * it needs on its own, so watcher setup runs in whichever callback fires
+   * second. `ensureRunning()` gates on `ctx && mounts-populated`.
    */
   initStore(store: JsStore): void {
     this.store = store;
@@ -114,6 +124,8 @@ export class WorkspaceModule implements Module {
       };
       this.mounts.set(mount.name, mountState);
     }
+
+    this.ensureRunning();
   }
 
   async start(ctx: ModuleContext): Promise<void> {
@@ -133,23 +145,56 @@ export class WorkspaceModule implements Module {
       }
     }
 
-    // Start watchers for 'always' mode mounts
+    this.ensureRunning();
+  }
+
+  /**
+   * Start chokidar watchers and emit workspace:mounted events.
+   * Idempotent: safe to call from both start() and initStore(), fires once
+   * per mount regardless of which runs second.
+   */
+  private ensureRunning(): void {
+    if (!this.ctx || this.mounts.size === 0) return;
+
     for (const [name, mount] of this.mounts) {
+      if (this.watchers.has(name)) continue;
+
       const watchMode = mount.config.watch ?? 'always';
       if (watchMode === 'always') {
-        const watcher = new MountWatcher(mount.config, (paths) => {
-          this.handleFsChanges(name, paths);
+        const watcher = new MountWatcher(mount.config, (changes) => {
+          this.handleFsChanges(name, changes);
         });
         watcher.start();
         this.watchers.set(name, watcher);
+
+        // Chokidar is started with ignoreInitial:true, so files already on
+        // disk at session start would be invisible. Trigger one syncFromFs
+        // pass — syncFromFs diffs disk against the tree state, so only files
+        // new-to-this-session's-tree fire workspace:created events. Fresh
+        // sessions see the existing catalog; restarts only see what appeared
+        // while the session was down.
+        void this.initialScan(name);
       }
 
-      // Emit mounted event
-      this.ctx?.pushEvent({
+      this.ctx.pushEvent({
         type: 'workspace:mounted',
         mount: name,
         path: mount.config.path,
       } as ProcessEvent);
+    }
+  }
+
+  private async initialScan(mountName: string): Promise<void> {
+    const store = this.store;
+    const mount = this.mounts.get(mountName);
+    if (!store || !mount) return;
+
+    try {
+      const result = await syncFromFs(store, mount);
+      mount.initialSyncDone = true;
+      this.emitFsEvents(mountName, result.synced, result.conflicts);
+    } catch (err) {
+      console.warn(`[workspace] initial scan failed for ${mountName}:`, err);
     }
   }
 
@@ -330,8 +375,26 @@ export class WorkspaceModule implements Module {
     }
   }
 
-  async onProcess(_event: ProcessEvent, _state: ProcessState): Promise<EventResponse> {
-    return {};
+  async onProcess(event: ProcessEvent, _state: ProcessState): Promise<EventResponse> {
+    // Wake agents on filesystem events when the originating mount opted in.
+    // The EventGate still has final say — gate policies can further filter by
+    // mount name, path glob, or op type without requiring a recipe change.
+    if (!(WORKSPACE_FS_EVENT_TYPES as readonly string[]).includes(event.type)) {
+      return {};
+    }
+    const mountName = (event as { mount?: string }).mount;
+    if (!mountName) return {};
+    const mount = this.mounts.get(mountName);
+    if (!mount) return {};
+
+    const flag = mount.config.wakeOnChange;
+    if (!flag) return {};
+
+    const op = event.type.slice('workspace:'.length) as WorkspaceFsOp;
+    const opAllowed = flag === true || (Array.isArray(flag) && flag.includes(op));
+    if (!opAllowed) return {};
+
+    return { requestInference: true };
   }
 
   // ==========================================================================
@@ -364,6 +427,44 @@ export class WorkspaceModule implements Module {
   private getStore(): JsStore {
     if (!this.store) throw new Error('WorkspaceModule: store not initialized. Call initStore() first.');
     return this.store;
+  }
+
+  /**
+   * Persist a single write/edit/delete to disk when the mount opts in via
+   * `autoMaterialize`. Required for cross-agent pipelines — another agent's
+   * chokidar watcher on the same directory only sees real filesystem events.
+   * The local watcher's `suppress()` absorbs the echo so we don't self-wake.
+   */
+  private async autoMaterialize(
+    mount: MountState,
+    relativePath: string,
+    op: 'write' | 'delete',
+    content?: Buffer,
+  ): Promise<void> {
+    if (!mount.config.autoMaterialize) return;
+    if (mount.config.mode === 'read-only') return;
+
+    const absolutePath = join(mount.config.path, relativePath);
+    const watcher = this.watchers.get(mount.config.name);
+    watcher?.suppress(relativePath);
+
+    try {
+      if (op === 'write' && content) {
+        await mkdir(dirname(absolutePath), { recursive: true });
+        await writeFile(absolutePath, content);
+        mount.materializedHashes.set(relativePath, hashContent(content));
+      } else if (op === 'delete') {
+        try {
+          await unlink(absolutePath);
+        } catch (err) {
+          // File may already be gone on disk; swallow ENOENT, surface the rest.
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        mount.materializedHashes.delete(relativePath);
+      }
+    } catch (err) {
+      console.warn(`[workspace] autoMaterialize failed for ${mount.config.name}/${relativePath}:`, err);
+    }
   }
 
   // ==========================================================================
@@ -456,12 +557,14 @@ export class WorkspaceModule implements Module {
       return { success: false, error: `Content exceeds max file size (${maxSize} bytes)`, isError: true };
     }
 
-    const blobHash = store.storeBlob(Buffer.from(input.content, 'utf-8'), 'text/plain');
+    const buffer = Buffer.from(input.content, 'utf-8');
+    const blobHash = store.storeBlob(buffer, 'text/plain');
     store.treeSet(mount.treeStateId, relativePath, {
       blobHash,
       size: Buffer.byteLength(input.content),
       mode: 0o644,
     });
+    await this.autoMaterialize(mount, relativePath, 'write', buffer);
 
     return {
       success: true,
@@ -513,12 +616,14 @@ export class WorkspaceModule implements Module {
       ? content.replaceAll(input.oldString, input.newString)
       : content.replace(input.oldString, input.newString);
 
-    const newBlobHash = store.storeBlob(Buffer.from(content, 'utf-8'), 'text/plain');
+    const newBuffer = Buffer.from(content, 'utf-8');
+    const newBlobHash = store.storeBlob(newBuffer, 'text/plain');
     store.treeSet(mount.treeStateId, relativePath, {
       blobHash: newBlobHash,
       size: Buffer.byteLength(content),
       mode: entry.mode,
     });
+    await this.autoMaterialize(mount, relativePath, 'write', newBuffer);
 
     return {
       success: true,
@@ -542,6 +647,7 @@ export class WorkspaceModule implements Module {
     }
 
     store.treeRemove(mount.treeStateId, relativePath);
+    await this.autoMaterialize(mount, relativePath, 'delete');
 
     return { success: true, data: { path: input.path, deleted: true } };
   }
@@ -869,20 +975,12 @@ export class WorkspaceModule implements Module {
       mount.initialSyncDone = true;
 
       if (result.synced.length > 0 || result.conflicts.length > 0) {
-        allResults.push({ mount: name, synced: result.synced, conflicts: result.conflicts });
-
-        // Emit workspace:changed event
-        if (this.ctx) {
-          const event: WorkspaceChangedEvent = {
-            type: 'workspace:changed',
-            paths: result.synced.map(p => `${name}/${p}`),
-            mount: name,
-            conflicts: result.conflicts.length > 0
-              ? result.conflicts.map(c => `${name}/${c.path}`)
-              : undefined,
-          };
-          this.ctx.pushEvent(event as ProcessEvent);
-        }
+        allResults.push({
+          mount: name,
+          synced: result.synced.map(s => s.path),
+          conflicts: result.conflicts,
+        });
+        this.emitFsEvents(name, result.synced, result.conflicts);
       }
     }
 
@@ -902,23 +1000,67 @@ export class WorkspaceModule implements Module {
 
   /**
    * Handle filesystem changes detected by watcher (watch: 'always' mode).
+   *
+   * The watcher carries the op per path. For created/modified we call
+   * syncFromFs to pull content into the tree; for deleted we strip the tree
+   * entry directly (the file is gone, nothing to read). We emit one event per
+   * op type.
    */
-  private async handleFsChanges(mountName: string, paths: string[]): Promise<void> {
+  private async handleFsChanges(mountName: string, changes: FsChange[]): Promise<void> {
     const store = this.store;
     const mount = this.mounts.get(mountName);
     if (!store || !mount) return;
 
-    const result = await syncFromFs(store, mount, paths);
+    const touchedPaths = changes.filter(c => c.op !== 'deleted').map(c => c.path);
+    const deletedPaths = changes.filter(c => c.op === 'deleted').map(c => c.path);
 
-    if ((result.synced.length > 0 || result.conflicts.length > 0) && this.ctx) {
-      const event: WorkspaceChangedEvent = {
-        type: 'workspace:changed',
-        paths: result.synced.map(p => `${mountName}/${p}`),
+    const syncResult = touchedPaths.length > 0
+      ? await syncFromFs(store, mount, touchedPaths)
+      : { synced: [], conflicts: [], skipped: [] };
+
+    // Strip deleted entries from the tree so downstream consumers see a
+    // coherent state. syncFromFs would also do this if we passed the paths in,
+    // but the op from the watcher is authoritative — skip the access() probe.
+    for (const p of deletedPaths) {
+      const existing = store.treeGet(mount.treeStateId, p);
+      if (existing) {
+        store.treeRemove(mount.treeStateId, p);
+        syncResult.synced.push({ path: p, op: 'deleted' });
+      }
+    }
+
+    this.emitFsEvents(mountName, syncResult.synced, syncResult.conflicts);
+  }
+
+  /**
+   * Group synced paths by op and push one ProcessEvent per non-empty op.
+   */
+  private emitFsEvents(
+    mountName: string,
+    synced: Array<{ path: string; op: WorkspaceFsOp }>,
+    conflicts: ConflictInfo[],
+  ): void {
+    if (!this.ctx || synced.length === 0) return;
+
+    const byOp = new Map<WorkspaceFsOp, string[]>();
+    for (const { path, op } of synced) {
+      const list = byOp.get(op) ?? [];
+      list.push(`${mountName}/${path}`);
+      byOp.set(op, list);
+    }
+
+    const conflictPaths = conflicts.length > 0
+      ? conflicts.map(c => `${mountName}/${c.path}`)
+      : undefined;
+
+    for (const [op, paths] of byOp) {
+      const type = opToEventType(op);
+      const event = {
+        type,
+        paths,
         mount: mountName,
-        conflicts: result.conflicts.length > 0
-          ? result.conflicts.map(c => `${mountName}/${c.path}`)
-          : undefined,
-      };
+        ...(op !== 'deleted' && conflictPaths ? { conflicts: conflictPaths } : {}),
+      } as WorkspaceCreatedEvent | WorkspaceModifiedEvent | WorkspaceDeletedEvent;
       this.ctx.pushEvent(event as ProcessEvent);
     }
   }

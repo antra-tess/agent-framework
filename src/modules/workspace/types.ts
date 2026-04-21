@@ -36,6 +36,26 @@ export interface MountConfig {
   followSymlinks?: boolean;
   /** Maximum file size in bytes (default: 5MB) */
   maxFileSize?: number;
+  /**
+   * If set, filesystem changes on this mount request inference.
+   * - `true` — wake on any op (created | modified | deleted)
+   * - array — wake only for the listed ops
+   *
+   * Self-writes through the module's own tools are already suppressed by the
+   * watcher, so a mount shared between agents only wakes on external writes.
+   * The EventGate still has final say — use gate policies for path-glob
+   * filtering or to disable wake temporarily via hot-reload.
+   */
+  wakeOnChange?: boolean | Array<'created' | 'modified' | 'deleted'>;
+
+  /**
+   * If true, writes/edits/deletes via the module's tools materialize to the
+   * filesystem immediately (not just into Chronicle tree state). Required for
+   * any mount shared across agents as a communication channel — without it,
+   * another agent's watcher on the same directory sees nothing. The watcher
+   * suppresses its own echoes, so this doesn't cause self-wake loops.
+   */
+  autoMaterialize?: boolean;
 }
 
 /**
@@ -175,11 +195,33 @@ export interface SyncInput {
 // Events
 // ============================================================================
 
-export interface WorkspaceChangedEvent {
-  type: 'workspace:changed';
+export type WorkspaceFsOp = 'created' | 'modified' | 'deleted';
+
+/**
+ * Fired when files in a mount are created. `paths` are mount-prefixed
+ * (e.g. "tickets/2026-04-20-foo.md"). Conflicts are reported when Chronicle
+ * sync detected divergence between the filesystem and the tree state.
+ */
+export interface WorkspaceCreatedEvent {
+  type: 'workspace:created';
   paths: string[];
   mount: string;
   conflicts?: string[];
+  [key: string]: unknown;
+}
+
+export interface WorkspaceModifiedEvent {
+  type: 'workspace:modified';
+  paths: string[];
+  mount: string;
+  conflicts?: string[];
+  [key: string]: unknown;
+}
+
+export interface WorkspaceDeletedEvent {
+  type: 'workspace:deleted';
+  paths: string[];
+  mount: string;
   [key: string]: unknown;
 }
 
@@ -197,6 +239,20 @@ export interface WorkspaceUnmountedEvent {
 }
 
 export type WorkspaceEvent =
-  | WorkspaceChangedEvent
+  | WorkspaceCreatedEvent
+  | WorkspaceModifiedEvent
+  | WorkspaceDeletedEvent
   | WorkspaceMountedEvent
   | WorkspaceUnmountedEvent;
+
+export const WORKSPACE_FS_EVENT_TYPES = [
+  'workspace:created',
+  'workspace:modified',
+  'workspace:deleted',
+] as const;
+
+export type WorkspaceFsEventType = typeof WORKSPACE_FS_EVENT_TYPES[number];
+
+export function opToEventType(op: WorkspaceFsOp): WorkspaceFsEventType {
+  return `workspace:${op}` as WorkspaceFsEventType;
+}
