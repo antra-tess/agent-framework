@@ -179,7 +179,7 @@ export class ChannelRegistry {
   private featureSetManager: FeatureSetManager;
   private pushEventFn: (event: ProcessEvent) => void;
   private emitTraceFn: (event: { type: string; [key: string]: unknown }) => void;
-  private sendTypingFn?: (serverId: string, channelId: string) => void;
+  private sendTypingFn?: (serverId: string, channelId: string, metadata?: Record<string, unknown>) => void;
   private shouldTriggerInference?: (content: string, metadata: Record<string, unknown>) => boolean;
 
   /** Registered channels, keyed by `{serverId}:{channelId}`. */
@@ -195,6 +195,10 @@ export class ChannelRegistry {
   /** Per-channel typing indicator timers. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
+  /** Per-channel typing metadata — carried on the 7s refresh so the target
+   *  server keeps getting the same routing hints (e.g. Zulip topic). */
+  private typingMetadata = new Map<string, Record<string, unknown>>();
+
   /**
    * Per-server channel auto-open policy. Populated by the framework from
    * each McplServerConfig at connect time; default ('auto') applies when
@@ -208,7 +212,7 @@ export class ChannelRegistry {
     pushEventFn: (event: ProcessEvent) => void,
     emitTraceFn: (event: { type: string; [key: string]: unknown }) => void,
     options?: ChannelRegistryOptions & {
-      sendTypingFn?: (serverId: string, channelId: string) => void;
+      sendTypingFn?: (serverId: string, channelId: string, metadata?: Record<string, unknown>) => void;
     },
   ) {
     this.serverRegistry = serverRegistry;
@@ -413,9 +417,13 @@ export class ChannelRegistry {
    *
    * No-op if already typing on this channel.
    */
-  startTyping(channelId: string): void {
+  startTyping(channelId: string, metadata?: Record<string, unknown>): void {
+    if (metadata) {
+      this.typingMetadata.set(channelId, metadata);
+    }
+
     if (this.typingIntervals.has(channelId)) {
-      return; // Already typing
+      return; // Already typing — metadata update above still took effect
     }
 
     // Find the channel entry and its server
@@ -427,7 +435,9 @@ export class ChannelRegistry {
     // Send typing immediately
     this.sendTypingNotification(entry.serverId, channelId);
 
-    // Set up interval
+    // Set up interval — pulls the latest metadata on each tick so mid-stream
+    // updates (e.g. a newer incoming message switching the relevant topic)
+    // take effect on the next refresh.
     const interval = setInterval(() => {
       this.sendTypingNotification(entry.serverId, channelId);
     }, TYPING_INTERVAL_MS);
@@ -448,12 +458,14 @@ export class ChannelRegistry {
         clearInterval(interval);
         this.typingIntervals.delete(channelId);
       }
+      this.typingMetadata.delete(channelId);
     } else {
       // Clear all typing intervals
       for (const interval of this.typingIntervals.values()) {
         clearInterval(interval);
       }
       this.typingIntervals.clear();
+      this.typingMetadata.clear();
     }
   }
 
@@ -652,7 +664,7 @@ export class ChannelRegistry {
    */
   private sendTypingNotification(serverId: string, channelId: string): void {
     if (this.sendTypingFn) {
-      this.sendTypingFn(serverId, channelId);
+      this.sendTypingFn(serverId, channelId, this.typingMetadata.get(channelId));
     }
     // TODO: When server-connection exposes a public sendNotification or
     // sendTyping method, wire it here directly instead of using a callback.
