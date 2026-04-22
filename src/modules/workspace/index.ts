@@ -432,6 +432,21 @@ export class WorkspaceModule implements Module {
   // ==========================================================================
 
   /**
+   * Resolve a mount-prefixed path (e.g. "tickets/2026-04-22-foo.md") to its
+   * absolute filesystem path. Returns null if the mount is unknown or the
+   * resolved path escapes the mount root (path-traversal guard). Public API
+   * for peer modules that need to read workspace files directly.
+   */
+  resolveAbsolutePath(mountPrefixedPath: string): string | null {
+    try {
+      const { mount, relativePath } = this.parsePath(mountPrefixedPath);
+      return resolve(mount.config.path, relativePath);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Parse a mount-prefixed path into (mountName, relativePath).
    */
   private parsePath(path: string): { mount: MountState; relativePath: string } {
