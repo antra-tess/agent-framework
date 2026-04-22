@@ -2467,10 +2467,10 @@ export class AgentFramework {
       (event) => this.pushEvent(event),
       (event) => this.emitTrace(event as { type: TraceEvent['type']; [key: string]: unknown }),
       {
-        sendTypingFn: (serverId, channelId, metadata) => {
+        sendTypingFn: (serverId, channelId, metadata, op) => {
           const server = this.mcplServerRegistry!.getServer(serverId);
           if (server) {
-            server.sendChannelsTyping(channelId, metadata);
+            server.sendChannelsTyping(channelId, metadata, op);
           }
         },
         shouldTriggerInference: triggerFilter,

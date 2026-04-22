@@ -179,7 +179,12 @@ export class ChannelRegistry {
   private featureSetManager: FeatureSetManager;
   private pushEventFn: (event: ProcessEvent) => void;
   private emitTraceFn: (event: { type: string; [key: string]: unknown }) => void;
-  private sendTypingFn?: (serverId: string, channelId: string, metadata?: Record<string, unknown>) => void;
+  private sendTypingFn?: (
+    serverId: string,
+    channelId: string,
+    metadata?: Record<string, unknown>,
+    op?: 'start' | 'stop',
+  ) => void;
   private shouldTriggerInference?: (content: string, metadata: Record<string, unknown>) => boolean;
 
   /** Registered channels, keyed by `{serverId}:{channelId}`. */
@@ -212,7 +217,12 @@ export class ChannelRegistry {
     pushEventFn: (event: ProcessEvent) => void,
     emitTraceFn: (event: { type: string; [key: string]: unknown }) => void,
     options?: ChannelRegistryOptions & {
-      sendTypingFn?: (serverId: string, channelId: string, metadata?: Record<string, unknown>) => void;
+      sendTypingFn?: (
+        serverId: string,
+        channelId: string,
+        metadata?: Record<string, unknown>,
+        op?: 'start' | 'stop',
+      ) => void;
     },
   ) {
     this.serverRegistry = serverRegistry;
@@ -458,13 +468,28 @@ export class ChannelRegistry {
         clearInterval(interval);
         this.typingIntervals.delete(channelId);
       }
+      // Dispatch an explicit 'stop' so servers that support it (e.g. Zulip)
+      // clear the indicator immediately rather than waiting for auto-expire.
+      // Metadata still carries the routing hint so the stop hits the same
+      // topic/thread as the start.
+      const entry = this.findChannelEntry(channelId);
+      if (entry && this.sendTypingFn) {
+        this.sendTypingFn(entry.serverId, channelId, this.typingMetadata.get(channelId), 'stop');
+      }
       this.typingMetadata.delete(channelId);
     } else {
-      // Clear all typing intervals
+      // Clear all typing intervals and dispatch stop for each known channel
+      const channels = Array.from(this.typingIntervals.keys());
       for (const interval of this.typingIntervals.values()) {
         clearInterval(interval);
       }
       this.typingIntervals.clear();
+      if (this.sendTypingFn) {
+        for (const id of channels) {
+          const entry = this.findChannelEntry(id);
+          if (entry) this.sendTypingFn(entry.serverId, id, this.typingMetadata.get(id), 'stop');
+        }
+      }
       this.typingMetadata.clear();
     }
   }

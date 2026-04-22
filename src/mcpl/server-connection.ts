@@ -447,9 +447,15 @@ export class McplServerConnection extends EventEmitter {
    *  `metadata` is opaque routing hints for the server — e.g. Zulip uses
    *  `topic` to target a specific thread; other servers ignore what they don't
    *  recognize. Typically sourced from the most recent incoming message's
-   *  metadata on the same channel. */
-  sendChannelsTyping(channelId: string, metadata?: Record<string, unknown>): void {
-    const params: Record<string, unknown> = { channelId };
+   *  metadata on the same channel.
+   *  `op` defaults to 'start'; pass 'stop' to clear an active indicator
+   *  immediately rather than waiting for server-side auto-expire. */
+  sendChannelsTyping(
+    channelId: string,
+    metadata?: Record<string, unknown>,
+    op: 'start' | 'stop' = 'start',
+  ): void {
+    const params: Record<string, unknown> = { channelId, op };
     if (metadata) params.metadata = metadata;
     this.sendNotification(McplMethod.ChannelsTyping, params);
   }
