@@ -474,6 +474,16 @@ export class AgentFramework {
   }
 
   /**
+   * Public accessor for the MCPL channel registry.
+   * Null when no MCPL servers are configured.
+   * Modules that need channel-level operations (typing indicators, default publish channel,
+   * etc.) obtain them here.
+   */
+  get channels(): ChannelRegistry | null {
+    return this.channelRegistry;
+  }
+
+  /**
    * Remove a trace event listener.
    */
   offTrace(listener: TraceEventListener): void {
