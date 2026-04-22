@@ -206,6 +206,13 @@ export type TraceEvent =
       agentName: string;
       fromBranch: string;
       toBranch: string;
+    })
+
+  // MCPL subprocess stderr (one trace per line, for receipts when things break)
+  | (TraceEventBase & {
+      type: 'mcpl:server-stderr';
+      serverId: string;
+      line: string;
     });
 
 /**

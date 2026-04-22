@@ -2547,6 +2547,12 @@ export class AgentFramework {
    * Push events and inference requests are deferred to Steps 6/7.
    */
   private wireMcplEvents(connection: McplServerConnection): void {
+    // Forward subprocess stderr lines as trace events so consumers (conhost,
+    // log sinks, TUI badges) can persist and surface them.
+    connection.on('stderr', (params: { line: string }) => {
+      this.emitTrace({ type: 'mcpl:server-stderr', serverId: connection.id, line: params.line });
+    });
+
     // Handle dynamic feature set changes from server
     connection.on('feature-sets-changed', (params: FeatureSetsChangedParams) => {
       this.featureSetManager?.handleFeatureSetsChanged(connection.id, params);
