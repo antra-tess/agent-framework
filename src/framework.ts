@@ -51,6 +51,7 @@ import { InferenceRouter } from './mcpl/inference-router.js';
 import { ChannelRegistry } from './mcpl/channel-registry.js';
 import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
+import { isToolAllowed } from './mcpl/tool-policy.js';
 import { EventGate } from './gate/event-gate.js';
 import { UsageTracker, type PersistedUsageState } from './usage/usage-tracker.js';
 import type { SessionUsageSnapshot, UsageUpdatedEvent } from './usage/types.js';
@@ -2111,6 +2112,13 @@ export class AgentFramework {
     }
     const prefix = config.toolPrefix ?? `mcpl--${config.id}`;
     const toolName = call.name.slice(prefix.length + 2); // Strip prefix + '--'
+    if (!isToolAllowed(toolName, config)) {
+      return {
+        success: false,
+        error: `Tool '${call.name}' is not permitted by this server's tool policy.`,
+        isError: true,
+      };
+    }
     try {
       const result = await server.sendToolsCall(toolName, call.input as Record<string, unknown>);
       return {
@@ -2660,6 +2668,7 @@ export class AgentFramework {
       try {
         const result = await server.sendToolsList();
         for (const tool of result.tools) {
+          if (!isToolAllowed(tool.name, config)) continue;
           // MCP tool schemas are generic JSON Schema; cast to membrane's ToolDefinition format
           const schema = tool.inputSchema as import('./types/index.js').ToolDefinition['inputSchema'];
           tools.push({
@@ -2745,6 +2754,23 @@ export class AgentFramework {
         agentName,
         moduleName: `mcpl:${serverId}`,
         result: { success: false, error: `MCPL server not found: ${serverId}`, isError: true },
+      });
+      return;
+    }
+
+    const config = this.mcplServerConfigs.get(serverId);
+    if (!isToolAllowed(toolName, config)) {
+      this.emitTrace({ type: 'tool:failed', module: `mcpl:${serverId}`, tool: toolName, callId: call.id, error: 'denied by tool policy' });
+      this.pushEvent({
+        type: 'tool-result',
+        callId: call.id,
+        agentName,
+        moduleName: `mcpl:${serverId}`,
+        result: {
+          success: false,
+          error: `Tool '${call.name}' is not permitted by this server's tool policy.`,
+          isError: true,
+        },
       });
       return;
     }
