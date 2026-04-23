@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -107,5 +107,45 @@ describe('MountWatcher mergeOp', () => {
     const forFile = batches.flat().filter(c => c.path === 'a.md');
     assert.strictEqual(forFile.length, 1);
     assert.strictEqual(forFile[0].op, 'modified');
+  });
+});
+
+describe('MountWatcher lifecycle', () => {
+  it('mkdir -p covers missing parent dir at attach time (case C repro)', async () => {
+    const nested = join(tmp, 'parent-also-missing', 'tickets');
+    assert.ok(!existsSync(nested), 'precondition: nested path should not exist');
+
+    const batches: FsChange[][] = [];
+    let ready = false;
+    const watcher = new MountWatcher(
+      { name: 'tickets', path: nested, mode: 'read-write', watch: 'always', watchDebounceMs: DEBOUNCE_MS },
+      (changes) => { batches.push(changes); },
+      { onReady: () => { ready = true; } },
+    );
+    watcher.start();
+
+    await wait(150);
+    assert.ok(existsSync(nested), 'start() should have created the watched path');
+
+    writeFileSync(join(nested, 'ticket.md'), 'hi');
+    await wait(SETTLE_MS);
+    await watcher.stop();
+
+    assert.ok(ready, 'onReady should have fired');
+    const created = batches.flat().find(c => c.path === 'ticket.md');
+    assert.ok(created, `expected created event for ticket.md, got ${JSON.stringify(batches.flat())}`);
+    assert.strictEqual(created.op, 'created');
+  });
+
+  it('read-only mount does not create the watched path', async () => {
+    const roPath = join(tmp, 'read-only-missing');
+    const watcher = new MountWatcher(
+      { name: 'ro', path: roPath, mode: 'read-only', watch: 'always', watchDebounceMs: DEBOUNCE_MS },
+      () => {},
+    );
+    watcher.start();
+    await wait(50);
+    assert.ok(!existsSync(roPath), 'read-only mount must not mkdir -p behind the user\'s back');
+    await watcher.stop();
   });
 });

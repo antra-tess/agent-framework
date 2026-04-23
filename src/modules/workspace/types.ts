@@ -94,6 +94,15 @@ export interface MountState {
   lastMaterializedBranchId: string | null;
   /** Per-file hash at time of last materialization — baseline for conflict detection */
   materializedHashes: Map<string, string>;
+  /**
+   * Wall-clock time chokidar emitted `ready` for this mount, or null if the
+   * watcher hasn't finished its initial scan. null after session start =
+   * watcher attach silently failed; a set value with empty tree = attached
+   * to an empty directory.
+   */
+  watcherReadyAt: number | null;
+  /** Most recent chokidar error for this mount, if any. */
+  watcherError: string | null;
 }
 
 /**
@@ -104,6 +113,8 @@ export interface WorkspaceModuleState {
   mounts: Record<string, {
     lastMaterializedSeq: number;
     lastMaterializedBranchId?: string;
+    watcherReadyAt?: number | null;
+    watcherError?: string | null;
   }>;
   /** Branch ID considered "active" for materialization */
   activeBranchId?: string;

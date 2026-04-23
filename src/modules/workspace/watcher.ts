@@ -6,6 +6,7 @@
  */
 
 import { watch, type FSWatcher } from 'chokidar';
+import { mkdirSync } from 'node:fs';
 import { type MountConfig } from './types.js';
 
 export type FsOp = 'created' | 'modified' | 'deleted';
@@ -17,6 +18,18 @@ export interface FsChange {
 
 export interface WatcherEvents {
   onChange(changes: FsChange[]): void;
+}
+
+/**
+ * Optional lifecycle callbacks. Without these, chokidar's `ready` and `error`
+ * events are silently dropped — which is how a failed attach can look
+ * identical to an empty directory in the recorded state.
+ */
+export interface WatcherLifecycle {
+  /** Fires once, when chokidar completes its initial scan. */
+  onReady?: () => void;
+  /** Fires on any chokidar-reported error (ENOENT, EACCES, platform faults). */
+  onError?: (err: Error) => void;
 }
 
 /**
@@ -34,14 +47,17 @@ export class MountWatcher {
   private readonly debounceMs: number;
   private readonly config: MountConfig;
   private readonly onChangeCallback: (changes: FsChange[]) => void;
+  private readonly lifecycle: WatcherLifecycle;
 
   constructor(
     config: MountConfig,
     onChange: (changes: FsChange[]) => void,
+    lifecycle: WatcherLifecycle = {},
   ) {
     this.config = config;
     this.debounceMs = config.watchDebounceMs ?? 300;
     this.onChangeCallback = onChange;
+    this.lifecycle = lifecycle;
   }
 
   /**
@@ -49,6 +65,21 @@ export class MountWatcher {
    */
   start(): void {
     if (this.watcher) return;
+
+    // Read-write mounts: ensure the path exists before chokidar attaches.
+    // chokidar 4's fs.watch-based backend silently fails to fire events when
+    // the watched path OR any of its parent directories don't exist at
+    // subscribe time (see case C in the WSL/Linux repro). `ready` still fires,
+    // so the failure is indistinguishable from an empty directory without
+    // this defensive mkdir. Read-only mounts are left alone — creating
+    // directories a user asked us only to read would be surprising.
+    if (this.config.mode === 'read-write') {
+      try {
+        mkdirSync(this.config.path, { recursive: true });
+      } catch (err) {
+        this.lifecycle.onError?.(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
 
     const ignored = this.config.ignore ?? [];
 
@@ -79,6 +110,15 @@ export class MountWatcher {
     this.watcher.on('add', handleEvent('created'));
     this.watcher.on('change', handleEvent('modified'));
     this.watcher.on('unlink', handleEvent('deleted'));
+
+    if (this.lifecycle.onReady) {
+      this.watcher.once('ready', this.lifecycle.onReady);
+    }
+    if (this.lifecycle.onError) {
+      this.watcher.on('error', (err) => {
+        this.lifecycle.onError?.(err instanceof Error ? err : new Error(String(err)));
+      });
+    }
   }
 
   /**

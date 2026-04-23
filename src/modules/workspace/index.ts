@@ -121,6 +121,8 @@ export class WorkspaceModule implements Module {
         initialSyncDone: false,
         lastMaterializedBranchId: null,
         materializedHashes: new Map(),
+        watcherReadyAt: null,
+        watcherError: null,
       };
       this.mounts.set(mount.name, mountState);
     }
@@ -140,6 +142,9 @@ export class WorkspaceModule implements Module {
           if (mount) {
             mount.lastMaterializedSeq = meta.lastMaterializedSeq;
             mount.lastMaterializedBranchId = meta.lastMaterializedBranchId ?? null;
+            // watcherReadyAt intentionally not restored — each session must
+            // observe its own watcher attach, otherwise a stale timestamp
+            // would hide a new-session attach failure.
           }
         }
       }
@@ -161,9 +166,27 @@ export class WorkspaceModule implements Module {
 
       const watchMode = mount.config.watch ?? 'always';
       if (watchMode === 'always') {
-        const watcher = new MountWatcher(mount.config, (changes) => {
-          this.handleFsChanges(name, changes);
-        });
+        const watcher = new MountWatcher(
+          mount.config,
+          (changes) => {
+            this.handleFsChanges(name, changes);
+          },
+          {
+            onReady: () => {
+              mount.watcherReadyAt = Date.now();
+              mount.watcherError = null;
+            },
+            onError: (err) => {
+              mount.watcherError = err.message;
+              this.ctx?.pushEvent({
+                type: 'workspace:watcher-error',
+                mount: name,
+                path: mount.config.path,
+                error: err.message,
+              } as ProcessEvent);
+            },
+          },
+        );
         watcher.start();
         this.watchers.set(name, watcher);
 
@@ -212,6 +235,8 @@ export class WorkspaceModule implements Module {
         state.mounts[name] = {
           lastMaterializedSeq: mount.lastMaterializedSeq,
           lastMaterializedBranchId: mount.lastMaterializedBranchId ?? undefined,
+          watcherReadyAt: mount.watcherReadyAt,
+          watcherError: mount.watcherError,
         };
       }
       this.ctx.setState(state);
@@ -405,6 +430,21 @@ export class WorkspaceModule implements Module {
   // ==========================================================================
   // Path Resolution
   // ==========================================================================
+
+  /**
+   * Resolve a mount-prefixed path (e.g. "tickets/2026-04-22-foo.md") to its
+   * absolute filesystem path. Returns null if the mount is unknown or the
+   * resolved path escapes the mount root (path-traversal guard). Public API
+   * for peer modules that need to read workspace files directly.
+   */
+  resolveAbsolutePath(mountPrefixedPath: string): string | null {
+    try {
+      const { mount, relativePath } = this.parsePath(mountPrefixedPath);
+      return resolve(mount.config.path, relativePath);
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Parse a mount-prefixed path into (mountName, relativePath).

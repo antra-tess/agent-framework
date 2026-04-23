@@ -51,6 +51,7 @@ import { InferenceRouter } from './mcpl/inference-router.js';
 import { ChannelRegistry } from './mcpl/channel-registry.js';
 import { safeSlice } from './safe-slice.js';
 import { CheckpointManager } from './mcpl/checkpoint-manager.js';
+import { isToolAllowed } from './mcpl/tool-policy.js';
 import { EventGate } from './gate/event-gate.js';
 import { UsageTracker, type PersistedUsageState } from './usage/usage-tracker.js';
 import type { SessionUsageSnapshot, UsageUpdatedEvent } from './usage/types.js';
@@ -471,6 +472,16 @@ export class AgentFramework {
    */
   onTrace(listener: TraceEventListener): void {
     this.traceListeners.push(listener);
+  }
+
+  /**
+   * Public accessor for the MCPL channel registry.
+   * Null when no MCPL servers are configured.
+   * Modules that need channel-level operations (typing indicators, default publish channel,
+   * etc.) obtain them here.
+   */
+  get channels(): ChannelRegistry | null {
+    return this.channelRegistry;
   }
 
   /**
@@ -2101,6 +2112,13 @@ export class AgentFramework {
     }
     const prefix = config.toolPrefix ?? `mcpl--${config.id}`;
     const toolName = call.name.slice(prefix.length + 2); // Strip prefix + '--'
+    if (!isToolAllowed(toolName, config)) {
+      return {
+        success: false,
+        error: `Tool '${call.name}' is not permitted by this server's tool policy.`,
+        isError: true,
+      };
+    }
     try {
       const result = await server.sendToolsCall(toolName, call.input as Record<string, unknown>);
       return {
@@ -2457,10 +2475,10 @@ export class AgentFramework {
       (event) => this.pushEvent(event),
       (event) => this.emitTrace(event as { type: TraceEvent['type']; [key: string]: unknown }),
       {
-        sendTypingFn: (serverId, channelId) => {
+        sendTypingFn: (serverId, channelId, metadata, op) => {
           const server = this.mcplServerRegistry!.getServer(serverId);
           if (server) {
-            server.sendChannelsTyping(channelId);
+            server.sendChannelsTyping(channelId, metadata, op);
           }
         },
         shouldTriggerInference: triggerFilter,
@@ -2547,6 +2565,12 @@ export class AgentFramework {
    * Push events and inference requests are deferred to Steps 6/7.
    */
   private wireMcplEvents(connection: McplServerConnection): void {
+    // Forward subprocess stderr lines as trace events so consumers (conhost,
+    // log sinks, TUI badges) can persist and surface them.
+    connection.on('stderr', (params: { line: string }) => {
+      this.emitTrace({ type: 'mcpl:server-stderr', serverId: connection.id, line: params.line });
+    });
+
     // Handle dynamic feature set changes from server
     connection.on('feature-sets-changed', (params: FeatureSetsChangedParams) => {
       this.featureSetManager?.handleFeatureSetsChanged(connection.id, params);
@@ -2644,6 +2668,7 @@ export class AgentFramework {
       try {
         const result = await server.sendToolsList();
         for (const tool of result.tools) {
+          if (!isToolAllowed(tool.name, config)) continue;
           // MCP tool schemas are generic JSON Schema; cast to membrane's ToolDefinition format
           const schema = tool.inputSchema as import('./types/index.js').ToolDefinition['inputSchema'];
           tools.push({
@@ -2729,6 +2754,23 @@ export class AgentFramework {
         agentName,
         moduleName: `mcpl:${serverId}`,
         result: { success: false, error: `MCPL server not found: ${serverId}`, isError: true },
+      });
+      return;
+    }
+
+    const config = this.mcplServerConfigs.get(serverId);
+    if (!isToolAllowed(toolName, config)) {
+      this.emitTrace({ type: 'tool:failed', module: `mcpl:${serverId}`, tool: toolName, callId: call.id, error: 'denied by tool policy' });
+      this.pushEvent({
+        type: 'tool-result',
+        callId: call.id,
+        agentName,
+        moduleName: `mcpl:${serverId}`,
+        result: {
+          success: false,
+          error: `Tool '${call.name}' is not permitted by this server's tool policy.`,
+          isError: true,
+        },
       });
       return;
     }

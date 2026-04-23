@@ -180,6 +180,24 @@ export interface McplServerConfig {
   /** Feature sets to explicitly disable on connect */
   disabledFeatureSets?: string[];
 
+  /**
+   * Tool allow-list (bare tool names as the server exports them, no toolPrefix).
+   * Supports `*` as a substring wildcard (e.g. `read_*`, `*_file`, `*`).
+   * If set, only tools matching at least one pattern are exposed.
+   * `disabledTools` takes precedence on conflict.
+   *
+   * Filter is applied in two places: at tool-list time (model never sees the
+   * tool) and at dispatch time (call rejected with a tool-result error, in
+   * case the model imitates a prior call from message history).
+   */
+  enabledTools?: string[];
+
+  /**
+   * Tool deny-list (bare tool names, same wildcard syntax as enabledTools).
+   * Wins over enabledTools on conflict.
+   */
+  disabledTools?: string[];
+
   /** Scope configurations per feature set */
   scopes?: Record<string, ScopeConfig>;
 

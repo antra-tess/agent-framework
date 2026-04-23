@@ -95,6 +95,9 @@ export class McplServerConnection extends EventEmitter {
   private reconnectIntervalMs = 5000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Swaps the line handler on the current child's stderr pipe. Re-bound on reconnect. */
+  private rebindStderr: ((next: (line: string) => void) => void) | null = null;
+
   /**
    * Private constructor. Use `McplServerConnection.connect()` instead.
    */
@@ -152,6 +155,33 @@ export class McplServerConnection extends EventEmitter {
   // ==========================================================================
 
   /**
+   * Wire stderr forwarding on a child process. Lines are forwarded to the
+   * supplied callback. The callback can be swapped at any time via `rebind`
+   * (used during reconnect, when we want already-wired pipes to target a new
+   * emitter).
+   */
+  private static wireStderrForwarding(
+    child: ChildProcess,
+    initialLineHandler: (line: string) => void,
+  ): { rebind: (next: (line: string) => void) => void } {
+    let onLine = initialLineHandler;
+    let carry = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const text = carry + chunk.toString('utf8');
+      const lines = text.split('\n');
+      carry = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.length > 0) onLine(line);
+      }
+    });
+    return {
+      rebind(next) {
+        onLine = next;
+      },
+    };
+  }
+
+  /**
    * Spawn a server process, perform the MCP initialize handshake with MCPL
    * capability negotiation, and return a ready-to-use connection.
    *
@@ -165,6 +195,14 @@ export class McplServerConnection extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...config.env },
     });
+
+    // Capture child stderr so it isn't silently dropped. During the handshake
+    // window (before the instance exists) lines are buffered; the buffer is
+    // drained once we have an instance to emit 'stderr' events on.
+    const earlyStderrBuffer: string[] = [];
+    const attachStderr = McplServerConnection.wireStderrForwarding(child, (line) =>
+      earlyStderrBuffer.push(line),
+    );
 
     // Fail fast if the process exits before the handshake completes
     const earlyExitPromise = new Promise<never>((_resolve, reject) => {
@@ -250,6 +288,16 @@ export class McplServerConnection extends EventEmitter {
     child.removeAllListeners('error');
 
     const connection = new McplServerConnection(config.id, mcplCaps, child, rl);
+
+    // Swap the stderr handler to emit events on the instance, then drain
+    // anything that arrived during the handshake window. Keep the rebind
+    // handle on the instance so reconnect can re-target it later.
+    connection.rebindStderr = attachStderr.rebind;
+    attachStderr.rebind((line: string) => connection.emit('stderr', { line }));
+    for (const line of earlyStderrBuffer) {
+      connection.emit('stderr', { line });
+    }
+    earlyStderrBuffer.length = 0;
 
     // Store config for reconnection
     if (config.reconnect) {
@@ -395,9 +443,21 @@ export class McplServerConnection extends EventEmitter {
     this.sendNotification(McplMethod.ChannelsOutgoingComplete, params as unknown as Record<string, unknown>);
   }
 
-  /** Send `channels/typing` notification (best-effort). */
-  sendChannelsTyping(channelId: string): void {
-    this.sendNotification(McplMethod.ChannelsTyping, { channelId });
+  /** Send `channels/typing` notification (best-effort).
+   *  `metadata` is opaque routing hints for the server — e.g. Zulip uses
+   *  `topic` to target a specific thread; other servers ignore what they don't
+   *  recognize. Typically sourced from the most recent incoming message's
+   *  metadata on the same channel.
+   *  `op` defaults to 'start'; pass 'stop' to clear an active indicator
+   *  immediately rather than waiting for server-side auto-expire. */
+  sendChannelsTyping(
+    channelId: string,
+    metadata?: Record<string, unknown>,
+    op: 'start' | 'stop' = 'start',
+  ): void {
+    const params: Record<string, unknown> = { channelId, op };
+    if (metadata) params.metadata = metadata;
+    this.sendNotification(McplMethod.ChannelsTyping, params);
   }
 
   // ==========================================================================
@@ -498,6 +558,21 @@ export class McplServerConnection extends EventEmitter {
       this.closed = false;
       this.nextRequestId = 1;
       this.pendingRequests.clear();
+
+      // Re-target stderr forwarding from the throwaway `fresh` instance to `this`.
+      //
+      // Note: this follows the same "transfer internals, leak listeners on the
+      // dead instance" pattern as the message-routing and lifecycle rewiring
+      // below — `fresh`'s own readline 'line' handler and process 'exit'
+      // handler stay registered on the transferred child, short-circuited by
+      // `fresh.closed = true` set in extractInternals(). Rebinding fresh's
+      // stderr listener (rather than removing it) keeps that invariant: if we
+      // ever clean up the message-routing duplication, fresh's stderr data
+      // listener closure-holds onLine and would need the same teardown.
+      if (fresh.rebindStderr) {
+        fresh.rebindStderr((line: string) => this.emit('stderr', { line }));
+        this.rebindStderr = fresh.rebindStderr;
+      }
 
       // Re-wire message routing and lifecycle on the new process
       this.setupMessageRouting();
