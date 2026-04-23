@@ -424,7 +424,51 @@ export class WorkspaceModule implements Module {
     const opAllowed = flag === true || (Array.isArray(flag) && flag.includes(op));
     if (!opAllowed) return {};
 
-    return { requestInference: true };
+    // Inject a context message so the model actually sees the event.
+    // The wake signal alone (requestInference) only starts an inference; the
+    // model needs textual evidence in its context to act on it. Symmetric with
+    // how the framework converts mcpl:channel-incoming / mcpl:push-event into
+    // user-role messages — we keep it module-side here so the gate stays a
+    // pure activation layer (no representation responsibility) and so the
+    // message format is colocated with the event source.
+    //
+    // Note: addMessages is applied unconditionally by the framework, but
+    // requestInference still passes through the EventGate. A gate-suppressed
+    // event will leave the message in context for the next inference to see —
+    // which is exactly what you want for the "burst landed during streaming"
+    // case.
+    const paths = ((event as { paths?: string[] }).paths ?? []).filter(p => typeof p === 'string');
+    const conflicts = (event as { conflicts?: string[] }).conflicts;
+    if (paths.length === 0) return { requestInference: true };
+
+    let text: string;
+    if (paths.length === 1) {
+      text = `[workspace event · ${op} · ${paths[0]}]`;
+    } else {
+      const list = paths.map(p => `- ${p}`).join('\n');
+      text = `[workspace event · ${op} · ${paths.length} files in ${mountName}/]\n${list}`;
+    }
+    if (conflicts && conflicts.length > 0) {
+      text += `\n[conflicts: ${conflicts.join(', ')}]`;
+    }
+
+    return {
+      requestInference: true,
+      addMessages: [
+        {
+          participant: 'user',
+          content: [{ type: 'text', text }],
+          metadata: {
+            source: 'workspace',
+            mount: mountName,
+            op,
+            paths,
+            triggered: true,
+            ...(conflicts && conflicts.length > 0 ? { conflicts } : {}),
+          },
+        },
+      ],
+    };
   }
 
   // ==========================================================================
