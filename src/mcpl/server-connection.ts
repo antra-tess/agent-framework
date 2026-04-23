@@ -560,6 +560,15 @@ export class McplServerConnection extends EventEmitter {
       this.pendingRequests.clear();
 
       // Re-target stderr forwarding from the throwaway `fresh` instance to `this`.
+      //
+      // Note: this follows the same "transfer internals, leak listeners on the
+      // dead instance" pattern as the message-routing and lifecycle rewiring
+      // below — `fresh`'s own readline 'line' handler and process 'exit'
+      // handler stay registered on the transferred child, short-circuited by
+      // `fresh.closed = true` set in extractInternals(). Rebinding fresh's
+      // stderr listener (rather than removing it) keeps that invariant: if we
+      // ever clean up the message-routing duplication, fresh's stderr data
+      // listener closure-holds onLine and would need the same teardown.
       if (fresh.rebindStderr) {
         fresh.rebindStderr((line: string) => this.emit('stderr', { line }));
         this.rebindStderr = fresh.rebindStderr;

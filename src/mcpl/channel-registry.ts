@@ -38,6 +38,21 @@ import type { ToolDefinition, ToolResult, ProcessEvent } from '../types/index.js
 
 const TYPING_INTERVAL_MS = 7_000;
 
+function shallowEqualRecord(
+  a: Record<string, unknown> | undefined,
+  b: Record<string, unknown> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
 // ============================================================================
 // Internal Types
 // ============================================================================
@@ -428,12 +443,26 @@ export class ChannelRegistry {
    * No-op if already typing on this channel.
    */
   startTyping(channelId: string, metadata?: Record<string, unknown>): void {
+    const metadataChanged =
+      metadata !== undefined &&
+      !shallowEqualRecord(this.typingMetadata.get(channelId), metadata);
     if (metadata) {
       this.typingMetadata.set(channelId, metadata);
     }
 
     if (this.typingIntervals.has(channelId)) {
-      return; // Already typing — metadata update above still took effect
+      // Already typing. If the caller supplied new routing metadata (e.g. the
+      // relevant Zulip topic just moved because a newer message arrived),
+      // dispatch an immediate refresh so the server sees the new routing
+      // within this request instead of waiting up to TYPING_INTERVAL_MS for
+      // the next tick.
+      if (metadataChanged) {
+        const entry = this.findChannelEntry(channelId);
+        if (entry) {
+          this.sendTypingNotification(entry.serverId, channelId);
+        }
+      }
+      return;
     }
 
     // Find the channel entry and its server
@@ -467,14 +496,16 @@ export class ChannelRegistry {
       if (interval) {
         clearInterval(interval);
         this.typingIntervals.delete(channelId);
-      }
-      // Dispatch an explicit 'stop' so servers that support it (e.g. Zulip)
-      // clear the indicator immediately rather than waiting for auto-expire.
-      // Metadata still carries the routing hint so the stop hits the same
-      // topic/thread as the start.
-      const entry = this.findChannelEntry(channelId);
-      if (entry && this.sendTypingFn) {
-        this.sendTypingFn(entry.serverId, channelId, this.typingMetadata.get(channelId), 'stop');
+        // Dispatch an explicit 'stop' so servers that support it (e.g. Zulip)
+        // clear the indicator immediately rather than waiting for auto-expire.
+        // Metadata still carries the routing hint so the stop hits the same
+        // topic/thread as the start. Guarded by `interval`: matches the
+        // global-clear branch's semantics, and keeps defensive stopTyping(ch)
+        // calls from spamming stops at a server that never saw a start.
+        const entry = this.findChannelEntry(channelId);
+        if (entry && this.sendTypingFn) {
+          this.sendTypingFn(entry.serverId, channelId, this.typingMetadata.get(channelId), 'stop');
+        }
       }
       this.typingMetadata.delete(channelId);
     } else {
