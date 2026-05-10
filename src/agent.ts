@@ -30,7 +30,13 @@ export class Agent {
   readonly allowedTools: 'all' | string[];
   readonly triggerSources: 'all' | string[];
   readonly maxTokens: number;
-  readonly temperature: number;
+  /**
+   * Sampling temperature. Optional — if undefined, the parameter is omitted
+   * from the inference request entirely. Required for newer Anthropic models
+   * (claude-opus-4-7+) that have deprecated the `temperature` parameter and
+   * return HTTP 400 if it's set, even to 1.
+   */
+  readonly temperature: number | undefined;
 
   private _state: AgentState = { status: 'idle' };
   private _inferenceStartedAt = 0;
@@ -51,7 +57,7 @@ export class Agent {
     this.allowedTools = config.allowedTools ?? 'all';
     this.triggerSources = config.triggerSources ?? 'all';
     this.maxTokens = config.maxTokens ?? 4096;
-    this.temperature = config.temperature ?? 1;
+    this.temperature = config.temperature;
     this.maxStreamTokens = config.maxStreamTokens ?? 150_000;
     this.contextManager = contextManager;
     this.membrane = membrane;
@@ -180,7 +186,7 @@ export class Agent {
       config: {
         model: this.model,
         maxTokens: this.maxTokens,
-        temperature: this.temperature,
+        ...(this.temperature !== undefined && { temperature: this.temperature }),
       },
       tools: tools.length > 0 ? tools : undefined,
       assistantParticipant: this.name,
@@ -310,7 +316,7 @@ export class Agent {
       config: {
         model: this.model,
         maxTokens: this.maxTokens,
-        temperature: this.temperature,
+        ...(this.temperature !== undefined && { temperature: this.temperature }),
       },
       tools: availableTools.length > 0 ? availableTools : undefined,
       promptCaching: true,
