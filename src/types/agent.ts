@@ -41,6 +41,17 @@ export interface AgentConfig {
   /** Max input tokens before framework breaks a yielding stream and
    *  restarts with recompiled (compressed) context. Default: 150000. */
   maxStreamTokens?: number;
+
+  /**
+   * Extended thinking config. When `enabled: true`, the agent runs with
+   * Anthropic's native extended thinking; responses include `thinking` blocks
+   * with cryptographic signatures, and the API enforces `temperature: 1`
+   * (Membrane handles this). Omit or set `enabled: false` to disable.
+   */
+  thinking?: {
+    enabled: boolean;
+    budgetTokens?: number;
+  };
 }
 
 /**
