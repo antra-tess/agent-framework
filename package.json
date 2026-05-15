@@ -1,6 +1,6 @@
 {
   "name": "@animalabs/agent-framework",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Multi-agent framework with pluggable modules, persistent state, and concurrent tool execution",
   "type": "module",
   "main": "dist/src/index.js",
@@ -39,7 +39,7 @@
   "license": "MIT",
   "dependencies": {
     "@animalabs/chronicle": "^0.1.0",
-    "@animalabs/context-manager": "^0.3.0",
+    "@animalabs/context-manager": "^0.4.1",
     "@animalabs/membrane": "^0.5.43",
     "chokidar": "^4.0.3",
     "discord.js": "^14.25.1",
