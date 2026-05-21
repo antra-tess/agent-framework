@@ -5,6 +5,9 @@
 export { ApiModule } from './api/index.js';
 export type { ApiEvent } from './api/index.js';
 
+export { HealthModule } from './health/index.js';
+export type { HealthModuleConfig } from './health/index.js';
+
 export { WorkspaceModule } from './workspace/index.js';
 export type {
   WorkspaceConfig,

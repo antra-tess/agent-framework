@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { JsStore } from '@animalabs/chronicle';
 import type { Membrane, ContentBlock, NormalizedRequest, YieldingStream, ToolResult as MembraneToolResult } from '@animalabs/membrane';
+import { MembraneError } from '@animalabs/membrane';
 import { ContextManager, PassthroughStrategy } from '@animalabs/context-manager';
 import type {
   MessageId,
@@ -108,13 +109,28 @@ class DefaultInferencePolicy implements InferencePolicy {
 
 /**
  * Default error policy - retry with exponential backoff.
+ *
+ * Respects MembraneError.retryable: non-retryable errors (400 invalid_request,
+ * 401 auth, context_length, safety) are terminal on attempt 0. Retrying them
+ * burns API quota without any chance of success — the payload doesn't change
+ * between attempts. Production traces showed clerk + reviewer wasting 4
+ * inferences on each 400 due to blind retries.
+ *
+ * For retryable errors, honors retryAfterMs when present (rate limits),
+ * otherwise falls back to exponential backoff capped at maxRetries.
  */
 class DefaultErrorPolicy implements ErrorPolicy {
   maxRetries = 3;
 
   onInferenceError(error: Error, _agentName: string, attempt: number): ErrorAction {
+    if (error instanceof MembraneError && !error.retryable) {
+      return { retry: false };
+    }
     if (attempt < this.maxRetries) {
-      return { retry: true, delayMs: Math.pow(2, attempt) * 1000 };
+      const delayMs = error instanceof MembraneError && error.retryAfterMs !== undefined
+        ? error.retryAfterMs
+        : Math.pow(2, attempt) * 1000;
+      return { retry: true, delayMs };
     }
     return { retry: false };
   }
@@ -680,13 +696,22 @@ export class AgentFramework {
       let toolCallsCount = 0;
       let settled = false;
       let inferenceStarted = false;
+      let lastActivity = Date.now();
 
       const STARTUP_TIMEOUT_MS = 30_000;
+      // After inference has started, give it 15 minutes of activity-bounded
+      // life. Each addressed trace event refreshes the deadline; only
+      // sustained silence trips it. Subagents that legitimately stream for
+      // 10+ minutes (e.g. long fork investigations) get the extra slack but
+      // stalled streams that emit `inference:completed` and then go quiet —
+      // the exact zombie shape we saw in production — are caught here.
+      const COMPLETION_IDLE_TIMEOUT_MS = 15 * 60_000;
 
       const cleanup = () => {
         if (settled) return;
         settled = true;
         clearTimeout(startupWatchdog);
+        clearInterval(completionWatchdog);
         this.offTrace(traceListener);
         this.agents.delete(agent.name);
       };
@@ -705,11 +730,33 @@ export class AgentFramework {
         }
       }, STARTUP_TIMEOUT_MS);
 
+      // Completion watchdog: once inference has started, reject if no trace
+      // activity for COMPLETION_IDLE_TIMEOUT_MS. Polls every 30s. Without
+      // this, an ephemeral that loses its terminal event (e.g. due to a
+      // future ordering regression or an upstream stream drop) hangs forever
+      // and keeps its concurrency slot pinned.
+      const completionWatchdog = setInterval(() => {
+        if (settled || !inferenceStarted) return;
+        const idle = Date.now() - lastActivity;
+        if (idle > COMPLETION_IDLE_TIMEOUT_MS) {
+          cleanup();
+          reject(new Error(
+            `Ephemeral agent "${agent.name}" stalled: no trace activity for ` +
+            `${Math.round(idle / 1000)}s after inference started (threshold ` +
+            `${Math.round(COMPLETION_IDLE_TIMEOUT_MS / 1000)}s). Stream likely ` +
+            `dropped or terminal event was lost.`
+          ));
+        }
+      }, 30_000);
+
       const traceListener = (event: TraceEvent) => {
         if (settled) return;
         // Only track events for our ephemeral agent
         const agentName = 'agentName' in event ? (event as { agentName: string }).agentName : null;
         if (agentName !== agent.name) return;
+
+        // Any addressed event counts as liveness for the completion watchdog.
+        lastActivity = Date.now();
 
         switch (event.type) {
           case 'inference:started':
@@ -732,13 +779,23 @@ export class AgentFramework {
             speech = '';
             break;
           case 'inference:completed': {
-            // Check if agent is idle (no pending tool calls = truly done)
-            // If tools were called, the agent will cycle through waiting_for_tools → ready → streaming
-            // and eventually complete again. We only resolve when there are no more tool calls.
-            if (agent.state.status === 'idle') {
-              cleanup();
-              resolve({ speech, toolCallsCount });
-            }
+            // `inference:completed` is terminal — driveStream only emits it
+            // from `case 'complete'`, which fires after the full tool
+            // round-trip has finished and the model has stopped. Intermediate
+            // tool-cycle transitions use `inference:stream_resumed`, not
+            // `inference:completed`. So we resolve unconditionally here.
+            //
+            // Previously this branch gated on `agent.state.status === 'idle'`,
+            // which was correct in intent but order-fragile: the framework
+            // emitted `inference:completed` BEFORE calling `agent.reset()`,
+            // so synchronous listeners observed status === 'streaming' at
+            // the trace boundary. The gate failed silently and the promise
+            // hung forever — every production zombie subagent originated
+            // here. The reset+emit order has been fixed in driveStream's
+            // `case 'complete'` handler; the gate is dropped here as
+            // belt-and-suspenders.
+            cleanup();
+            resolve({ speech, toolCallsCount });
             break;
           }
           case 'inference:turn_ended': {
@@ -1920,6 +1977,19 @@ export class AgentFramework {
                   cacheRead: du.cacheReadTokens,
                 }
               : undefined;
+
+            // Reset agent state BEFORE emitting inference:completed so that
+            // synchronous listeners (e.g. runEphemeralToCompletion) observe
+            // status === 'idle' the moment the event fires. Previously
+            // agent.reset() ran after `await dispatchSpeech`, which meant the
+            // ephemeral-completion listener saw status === 'streaming' at the
+            // trace boundary, failed its idle gate, and the promise hung
+            // forever — every "zombie subagent" in production tracked back
+            // here. Speech dispatch happens after but doesn't depend on the
+            // status field.
+            agent.reset();
+            this.eventGate?.onInferenceEnded(agent.name);
+
             this.emitTrace({
               type: 'inference:completed',
               agentName: agent.name,
@@ -1968,9 +2038,6 @@ export class AgentFramework {
               );
             }
 
-            // Done — reset to idle
-            agent.reset();
-            this.eventGate?.onInferenceEnded(agent.name);
             break;
           }
 
