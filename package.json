@@ -2,6 +2,10 @@
   "name": "@animalabs/agent-framework",
   "version": "0.5.5",
   "description": "Multi-agent framework with pluggable modules, persistent state, and concurrent tool execution",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anima-research/agent-framework.git"
+  },
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
