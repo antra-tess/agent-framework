@@ -560,6 +560,79 @@ export class AgentFramework {
   }
 
   /**
+   * Build the membrane-normalized request that WOULD be emitted if `agentName`
+   * were activated right now — WITHOUT running inference, opening a stream, or
+   * mutating agent state. Intended for debug/preview tooling.
+   *
+   * Transparency contract (default): the preview is side-effect-free and
+   * leaves no trace on the system. It does only read-only work —
+   * `ContextManager.compile` (which never triggers compression itself;
+   * compression runs in the background out-of-band), tool filtering, and
+   * system-prompt assembly — then delegates to `Agent.buildActivationRequest`.
+   * No tokens are spent, nothing is written to Chronicle, and no external
+   * MCPL server is contacted.
+   *
+   * The trade-off is fidelity: the dynamically-gathered ContextInjection[]
+   * (module `gatherContext` + MCPL `beforeInference` hooks) are NOT included
+   * by default, because gathering them is not transparent —
+   *   - module `gatherContext` can run inference (e.g. RetrievalModule makes
+   *     Haiku calls — real token cost and latency), and
+   *   - MCPL `beforeInference` hooks are arbitrary RPCs to external servers
+   *     with side effects, and a preview never sends the paired
+   *     `afterInference`, which can leave a stateful server half-open.
+   *
+   * Pass `{ injections: true }` to opt into full-fidelity gathering and accept
+   * those side effects (byte-faithful to a real activation's injected context).
+   */
+  async previewActivation(
+    agentName: string,
+    opts?: { injections?: boolean }
+  ): Promise<NormalizedRequest> {
+    const agent = this.agents.get(agentName);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentName}`);
+    }
+
+    const tools = this.getAllTools().filter((t) => agent.canUseTool(t.name));
+
+    // Default: no dynamic injection gathering → fully transparent (no
+    // inference, no Chronicle writes, no external RPC). Opt in explicitly.
+    if (!opts?.injections) {
+      return agent.buildActivationRequest(tools, undefined);
+    }
+
+    // Full-fidelity path: mirrors startAgentStream's injection gathering.
+    // NOT transparent — see the doc comment above.
+    let injections: ContextInjection[] | undefined;
+
+    // Module gatherContext (fail-open, matches startAgentStream)
+    try {
+      const moduleInjections = await this.moduleRegistry.gatherContext(agentName);
+      if (moduleInjections.length > 0) {
+        injections = moduleInjections;
+      }
+    } catch (error) {
+      console.error('Module gatherContext error (preview):', error);
+    }
+
+    // MCPL beforeInference hooks (fail-open). Note: the paired afterInference
+    // is intentionally never sent here — this is a preview, not a real turn.
+    if (this.hookOrchestrator) {
+      try {
+        const hookParams = this.buildBeforeInferenceParams(agent);
+        const hookInjections = await this.hookOrchestrator.beforeInference(hookParams);
+        if (hookInjections.length > 0) {
+          injections = injections ? [...injections, ...hookInjections] : hookInjections;
+        }
+      } catch (error) {
+        console.error('beforeInference hook error (preview):', error);
+      }
+    }
+
+    return agent.buildActivationRequest(tools, injections);
+  }
+
+  /**
    * Check if process logging is enabled.
    */
   isProcessLoggingEnabled(): { persist: boolean; broadcast: boolean } {

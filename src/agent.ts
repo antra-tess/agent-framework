@@ -282,6 +282,48 @@ export class Agent {
   }
 
   /**
+   * Build the membrane-normalized request that WOULD be emitted for this
+   * agent's next activation, given the supplied tools and injections.
+   *
+   * This is the single source of truth for request assembly, shared by the
+   * real activation path (`startStreamWithInjections`) and debug/preview
+   * tooling (`Framework.previewActivation`). It is pure and non-mutating:
+   * it does not touch agent state and does not call the membrane, and
+   * `ContextManager.compile` is itself side-effect-free (compression runs in
+   * the background). Safe to call regardless of the agent's current status.
+   */
+  async buildActivationRequest(
+    availableTools: ToolDefinition[],
+    injections?: ContextInjection[],
+    budget?: TokenBudget
+  ): Promise<NormalizedRequest> {
+    let { messages, systemInjections } = await this.compileWithInjections(budget, injections);
+
+    // Safety: ensure messages don't end with an assistant message.
+    // Some models reject trailing assistant messages ("prefill not supported"),
+    // and after context compression a stale assistant turn can end up last.
+    if (messages.length > 0 && messages[messages.length - 1]!.participant === this.name) {
+      messages = [...messages, {
+        participant: 'user',
+        content: [{ type: 'text', text: '[Continue]' }],
+      }];
+    }
+
+    return {
+      messages,
+      system: this.buildSystemPrompt(systemInjections),
+      config: {
+        model: this.model,
+        maxTokens: this.maxTokens,
+        ...(this.temperature !== undefined && { temperature: this.temperature }),
+      },
+      tools: availableTools.length > 0 ? availableTools : undefined,
+      promptCaching: true,
+      assistantParticipant: this.name,
+    };
+  }
+
+  /**
    * Start a yielding stream with context injections.
    * Same as startStream but passes injections through to compile.
    */
@@ -298,30 +340,7 @@ export class Agent {
     this._inferenceStartedAt = Date.now();
     this.lastStreamInputTokens = 0;
 
-    let { messages, systemInjections } = await this.compileWithInjections(budget, injections);
-
-    // Safety: ensure messages don't end with an assistant message.
-    // Some models reject trailing assistant messages ("prefill not supported"),
-    // and after context compression a stale assistant turn can end up last.
-    if (messages.length > 0 && messages[messages.length - 1]!.participant === this.name) {
-      messages = [...messages, {
-        participant: 'user',
-        content: [{ type: 'text', text: '[Continue]' }],
-      }];
-    }
-
-    const request: NormalizedRequest = {
-      messages,
-      system: this.buildSystemPrompt(systemInjections),
-      config: {
-        model: this.model,
-        maxTokens: this.maxTokens,
-        ...(this.temperature !== undefined && { temperature: this.temperature }),
-      },
-      tools: availableTools.length > 0 ? availableTools : undefined,
-      promptCaching: true,
-      assistantParticipant: this.name,
-    };
+    const request = await this.buildActivationRequest(availableTools, injections, budget);
 
     const stream = this.membrane.streamYielding(request, {
       emitTokens: true,
