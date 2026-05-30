@@ -145,7 +145,20 @@ export class FeatureSetManager {
     capabilities: McplCapabilities,
     config?: { enabledFeatureSets?: string[]; disabledFeatureSets?: string[] }
   ): FeatureSetsUpdateParams {
-    const declared = capabilities.featureSets ?? {};
+    // Cross-package compat: agent-framework's McplCapabilities types
+    // featureSets as Record<string, FeatureSetDeclaration>, but mcpl-core-ts
+    // (used by discord-mcpl and other servers) types it as an array of
+    // {name, ...FeatureSetDeclaration}. Both representations arrive over
+    // the wire. Normalize to Record here so downstream code (resolvePatterns,
+    // validateInbound, etc.) can rely on the keyed shape.
+    const featureSetsRaw = capabilities.featureSets ?? {};
+    const declared: Record<string, FeatureSetDeclaration> = Array.isArray(featureSetsRaw)
+      ? Object.fromEntries(
+          (featureSetsRaw as ReadonlyArray<FeatureSetDeclaration & { name: string }>).map(
+            (d) => [d.name, d],
+          ),
+        )
+      : featureSetsRaw;
 
     const state: ServerState = {
       declared: { ...declared },
