@@ -2062,21 +2062,44 @@ export class AgentFramework {
                 }
               }
             } else if (this.channelRegistry && hadToolCalls && allText.length > 0) {
-              // Diagnostic: the turn produced prose AND a tool call, so the prose
-              // is classified as `thoughts` (not speech) and is NOT routed to any
-              // channel — the turn is silent on Discord. This is the most common
-              // "why didn't it reply?" cause under host-owned routing. Surface it
-              // so that decision is visible instead of a mystery.
+              // Tool-call turn that also produced prose. Per design, route the
+              // prose to the locus as a reply UNLESS the turn used a "silencing"
+              // tool:
+              //   - `think`         — deliberate silence
+              //   - an explicit send/publish (channel_publish, *--send_message,
+              //     *--reply_message, *--send_dm) — already delivered; routing
+              //     again would double-post.
+              // Non-sending tools (shell, workspace, etc.) still let the agent
+              // speak in the same turn. The global speech/thoughts split is left
+              // untouched (module/TUI rendering unaffected) — this only governs
+              // what reaches the channel.
+              const SILENCING = new Set([
+                'think', 'channel_publish', 'send_message', 'reply_message', 'send_dm',
+              ]);
+              const bare = (n: string) => (n.includes('--') ? n.split('--').pop()! : n);
+              const toolNames = response.content
+                .filter((b) => b.type === 'tool_use')
+                .map((b) => (b as unknown as { name?: string }).name)
+                .filter((n): n is string => typeof n === 'string');
+              const silenced = toolNames.some((n) => SILENCING.has(bare(n)));
               const t = allText
                 .map((b) => (b as ContentBlock & { type: 'text' }).text)
                 .join('\n')
                 .trim();
-              if (t) {
+              if (silenced || !t) {
                 console.error(
-                  `[routing] ${agent.name}: ${t.length} chars of text accompanied a tool call -> ` +
-                  `classified as thoughts, NOT routed (silent turn). To reply, speak on a turn ` +
-                  `with no tool call (or use channel_publish).`,
+                  `[routing] ${agent.name}: tool-call turn [${toolNames.join(', ') || 'none'}] -> NOT routed ` +
+                  `(${silenced ? 'silencing tool / explicit send' : 'no prose'})`,
                 );
+              } else {
+                console.error(
+                  `[routing] ${agent.name}: tool-call turn [${toolNames.join(', ')}] -> routing trailing prose (${t.length} chars) as reply`,
+                );
+                try {
+                  await this.channelRegistry.routeSpeech(agent.name, t);
+                } catch (err) {
+                  console.error('speech routing failed:', err);
+                }
               }
             }
 
