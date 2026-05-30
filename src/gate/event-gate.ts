@@ -929,7 +929,7 @@ export class EventGate {
 
   getToolDefinition(): ToolDefinition {
     return {
-      name: 'gate:status',
+      name: 'gate_status',
       description: 'Show the current EventGate configuration, per-policy match counts, debounce state, and any config errors.',
       inputSchema: {
         type: 'object',

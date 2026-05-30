@@ -203,6 +203,20 @@ const CHANNEL_TOOL_DEFINITIONS: ToolDefinition[] = [
 interface ChannelRegistryOptions {
   /** Callback to determine whether an incoming message should trigger inference. */
   shouldTriggerInference?: (content: string, metadata: Record<string, unknown>) => boolean;
+  /**
+   * Called when a text-only turn's speech could NOT be delivered to its
+   * conversational locus — no locus, an unregistered channel, a missing
+   * server, or the server reporting `delivered: false`. The host wires this
+   * to drop a `[discord-send-failed]` marker into chronicle so the failure is
+   * visible to the agent (and operator) rather than silently lost. Must not
+   * itself trigger inference (avoid wake loops).
+   */
+  onRouteFailure?: (info: {
+    conversationId: string;
+    channelId: string | null;
+    reason: string;
+    textLen: number;
+  }) => void;
 }
 
 // ============================================================================
@@ -221,6 +235,12 @@ export class ChannelRegistry {
     op?: 'start' | 'stop',
   ) => void;
   private shouldTriggerInference?: (content: string, metadata: Record<string, unknown>) => boolean;
+  private onRouteFailure?: (info: {
+    conversationId: string;
+    channelId: string | null;
+    reason: string;
+    textLen: number;
+  }) => void;
 
   /** Registered channels, keyed by `{serverId}:{channelId}`. */
   private channels = new Map<string, ChannelEntry>();
@@ -266,6 +286,7 @@ export class ChannelRegistry {
     this.emitTraceFn = emitTraceFn;
     this.sendTypingFn = options?.sendTypingFn;
     this.shouldTriggerInference = options?.shouldTriggerInference;
+    this.onRouteFailure = options?.onRouteFailure;
   }
 
   /**
@@ -391,6 +412,43 @@ export class ChannelRegistry {
       this.defaultPublishChannel = message.channelId;
       this.defaultPublishMessageId = message.messageId;
       this.defaultPublishThreadId = message.threadId;
+
+      // Lazy-register the channel if we've never seen it. A channel can deliver
+      // an incoming message before its channels/register (boot enumeration) or
+      // channels/changed (post-boot create / View-permission grant) round-trip
+      // lands — or the registration event can be missed entirely (e.g. the bot
+      // gains visibility in a way that fires neither `channelCreate` nor a
+      // View-permission transition). Without a registry entry, routeSpeech()
+      // can't resolve this channel as an outbound locus and the agent's reply
+      // is silently dropped, even though this very message proves the channel
+      // is reachable. The inbound message carries enough to make it publishable,
+      // so register it here; a later authoritative channels/register or
+      // channels/changed will overwrite this descriptor with the richer one.
+      const incomingKey = `${serverId}:${message.channelId}`;
+      if (!this.channels.has(incomingKey)) {
+        const channelLabel =
+          typeof message.metadata?.channelName === 'string' && message.metadata.channelName
+            ? (message.metadata.channelName as string)
+            : message.channelId;
+        this.channels.set(incomingKey, {
+          serverId,
+          descriptor: {
+            id: message.channelId,
+            type: serverId,
+            label: channelLabel,
+            direction: 'bidirectional',
+            address: message.threadId ? { threadId: message.threadId } : undefined,
+            metadata: { lazyRegistered: true },
+          },
+          open: true,
+        });
+        this.emitTraceFn({
+          type: 'mcpl:channel-lazy-registered',
+          serverId,
+          channelId: message.channelId,
+          label: channelLabel,
+        });
+      }
 
       // Determine whether to trigger inference
       let triggerInference = true;
@@ -931,22 +989,34 @@ export class ChannelRegistry {
     conversationId: string,
     text: string,
   ): Promise<{ delivered: boolean; channelId: string } | null> {
+    // Surface a routing failure: emit a trace AND notify the host (which drops
+    // a `[discord-send-failed]` marker into chronicle) so the agent learns her
+    // reply never reached the human, instead of it vanishing silently.
+    const fail = (channelId: string | null, reason: string): null => {
+      console.error(`[routeSpeech] ${conversationId}: ${reason} — speech NOT routed (${text.length} chars stay in chronicle)`);
+      this.emitTraceFn({
+        type: 'mcpl:speech-route-failed',
+        channelId: channelId ?? '',
+        reason,
+        textLen: text.length,
+      });
+      this.onRouteFailure?.({ conversationId, channelId, reason, textLen: text.length });
+      return null;
+    };
+
     const channelId = this.defaultPublishChannel;
     if (!channelId) {
-      console.error(`[routeSpeech] ${conversationId}: no locus (defaultPublishChannel null) — speech NOT routed (${text.length} chars stay in chronicle)`);
-      return null;
+      return fail(null, 'no locus (defaultPublishChannel null)');
     }
 
     const entry = this.findChannelEntry(channelId);
     if (!entry) {
-      console.error(`[routeSpeech] ${conversationId}: no registered channel for locus "${channelId}" — speech NOT routed`);
-      return null;
+      return fail(channelId, `no registered channel for locus "${channelId}"`);
     }
 
     const server = this.serverRegistry.getServer(entry.serverId);
     if (!server) {
-      console.error(`[routeSpeech] ${conversationId}: server "${entry.serverId}" not found — speech NOT routed`);
-      return null;
+      return fail(channelId, `server "${entry.serverId}" not found`);
     }
 
     const publishParams: ChannelsPublishParams = {
@@ -957,6 +1027,13 @@ export class ChannelRegistry {
     const result = await server.sendChannelsPublish(publishParams);
     const delivered = (result as { delivered?: boolean } | undefined)?.delivered ?? true;
 
+    // The server accepted the publish RPC but reported the message was not
+    // actually delivered (e.g. missing Send Messages permission). Previously
+    // this returned `{ delivered: true }`, masking the failure. Surface it.
+    if (delivered === false) {
+      return fail(channelId, `server "${entry.serverId}" reported delivered:false for "${channelId}"`);
+    }
+
     console.error(`[routeSpeech] ${conversationId}: routed ${text.length} chars -> ${channelId} (server=${entry.serverId}, delivered=${delivered})`);
     this.emitTraceFn({
       type: 'mcpl:speech-routed',
@@ -966,7 +1043,7 @@ export class ChannelRegistry {
       textLen: text.length,
     });
 
-    return { delivered: true, channelId };
+    return { delivered, channelId };
   }
 
   private async handleToolPublish(input: { channelId?: string; content?: string; text?: string }): Promise<ToolResult> {

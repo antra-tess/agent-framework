@@ -249,6 +249,7 @@ export class AgentFramework {
       getMessage: (id) => this.getMessage(id),
       queryMessages: (filter) => this.queryMessages(filter),
       pushEvent: (event) => this.pushEvent(event),
+      onTrace: (listener) => this.onTrace(listener),
     });
   }
 
@@ -470,8 +471,15 @@ export class AgentFramework {
   /**
    * Add a trace event listener for observability.
    */
-  onTrace(listener: TraceEventListener): void {
+  onTrace(listener: TraceEventListener): () => void {
     this.traceListeners.push(listener);
+    // Return an unsubscribe so callers with a bounded lifetime (e.g. modules
+    // that get torn down and recreated on session switch) don't leak
+    // listeners. Existing callers that ignore the return value are unaffected.
+    return () => {
+      const idx = this.traceListeners.indexOf(listener);
+      if (idx >= 0) this.traceListeners.splice(idx, 1);
+    };
   }
 
   /**
@@ -1835,6 +1843,13 @@ export class AgentFramework {
     const myStreamId = agent.streamId;
     let hadToolCalls = false;
 
+    // Typing indicator: show "<agent> is typing…" in the channel she's
+    // responding to, for the whole duration of this turn. Started here (paired
+    // with the finally below, so it can never leak) and refreshed on a 7s
+    // interval by the ChannelRegistry until stopped on any exit path.
+    const typingChannel = this.channelRegistry?.getDefaultPublishChannel();
+    if (typingChannel) this.channelRegistry!.startTyping(typingChannel);
+
     try {
       for await (const event of stream) {
         switch (event.type) {
@@ -2201,6 +2216,9 @@ export class AgentFramework {
       agent.reset();
       this.eventGate?.onInferenceEnded(agent.name);
     } finally {
+      // Stop the typing indicator on every exit path (complete, error,
+      // exhausted, abort) so it never sticks after the turn ends.
+      this.channelRegistry?.stopTyping();
       this.activeStreams.delete(agent.name);
       this.pendingAssistantBlocks.delete(agent.name);
 
@@ -2374,8 +2392,8 @@ export class AgentFramework {
       return;
     }
 
-    // Route gate:status tool
-    if (enrichedCall.name === 'gate:status' && this.eventGate) {
+    // Route gate_status tool
+    if (enrichedCall.name === 'gate_status' && this.eventGate) {
       this.dispatchGateToolCall(agentName, enrichedCall);
       return;
     }
@@ -2625,6 +2643,26 @@ export class AgentFramework {
           }
         },
         shouldTriggerInference: triggerFilter,
+        // A text-only turn whose speech couldn't be delivered must not vanish
+        // silently: record a `[discord-send-failed]` marker in chronicle so the
+        // agent sees, on her next turn, that her reply never reached the human.
+        // addMessage() alone does not request inference, so this never wakes
+        // her (matching the `discord-send-failed-skip` gate intent: context
+        // yes, wake no).
+        onRouteFailure: ({ channelId, reason, textLen }) => {
+          try {
+            this.addMessage(
+              'user',
+              [{
+                type: 'text',
+                text: `[discord-send-failed] Your previous reply (${textLen} chars) could not be delivered to ${channelId ?? 'the channel'} (${reason}). It was saved to your archive but the human did not receive it.`,
+              }],
+              { system: true, kind: 'discord-send-failed', channelId: channelId ?? '', reason },
+            );
+          } catch (err) {
+            console.error('onRouteFailure: failed to record send-failure marker:', err);
+          }
+        },
       },
     );
 
