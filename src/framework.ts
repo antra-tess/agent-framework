@@ -1843,6 +1843,13 @@ export class AgentFramework {
     const myStreamId = agent.streamId;
     let hadToolCalls = false;
 
+    // Typing indicator: show "<agent> is typing…" in the channel she's
+    // responding to, for the whole duration of this turn. Started here (paired
+    // with the finally below, so it can never leak) and refreshed on a 7s
+    // interval by the ChannelRegistry until stopped on any exit path.
+    const typingChannel = this.channelRegistry?.getDefaultPublishChannel();
+    if (typingChannel) this.channelRegistry!.startTyping(typingChannel);
+
     try {
       for await (const event of stream) {
         switch (event.type) {
@@ -2209,6 +2216,9 @@ export class AgentFramework {
       agent.reset();
       this.eventGate?.onInferenceEnded(agent.name);
     } finally {
+      // Stop the typing indicator on every exit path (complete, error,
+      // exhausted, abort) so it never sticks after the turn ends.
+      this.channelRegistry?.stopTyping();
       this.activeStreams.delete(agent.name);
       this.pendingAssistantBlocks.delete(agent.name);
 
