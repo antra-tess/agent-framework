@@ -174,6 +174,26 @@ const CHANNEL_TOOL_DEFINITIONS: ToolDefinition[] = [
       required: [],
     },
   },
+  {
+    name: 'think',
+    description:
+      'Record a private thought and DELIBERATELY STAY SILENT this turn — nothing is ' +
+      'sent to any channel or surface. Use this when you have read messages but choose ' +
+      'not to reply, or when you just want to reason privately. Normally, plain text you ' +
+      'write on a turn with no tool call is auto-posted to the current channel; calling ' +
+      'think() makes this a non-speaking turn, so your words stay in your own context ' +
+      'instead. To actually speak, write normally (no tool call) or use channel_publish.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        content: {
+          type: 'string',
+          description: 'Your private thought / reasoning (optional; not sent anywhere).',
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 // ============================================================================
@@ -577,6 +597,9 @@ export class ChannelRegistry {
       case 'channel_publish':
         return this.handleToolPublish(input as { channelId: string; content: string });
 
+      case 'think':
+        return this.handleToolThink(input as { content?: string });
+
       default:
         return { success: false, error: `Unknown channel tool: ${toolName}`, isError: true };
     }
@@ -872,6 +895,67 @@ export class ChannelRegistry {
         isError: true,
       };
     }
+  }
+
+  /**
+   * Handle the synthesized `think` tool. This is a deliberate no-op as far as
+   * any surface is concerned: it sends nothing. Its only effect is that the
+   * agent invoked a tool, which makes the turn a non-speaking one (see
+   * framework speech/thoughts split) — so the host's output routing won't
+   * auto-publish the agent's text. The thought stays in the agent's own
+   * context/chronicle. This is the surface-agnostic "deliberation channel"
+   * realized as a host tool.
+   */
+  private handleToolThink(input: { content?: string }): ToolResult {
+    return {
+      success: true,
+      data: {
+        noted: true,
+        silent: true,
+        note: 'Stayed silent this turn — nothing was sent to any channel. Your thought remains in your context.',
+        content: typeof input?.content === 'string' ? input.content : undefined,
+      },
+    };
+  }
+
+  /**
+   * Host-owned output routing (see forking-knowledge-miner LOCUS-ROUTING-DESIGN).
+   * Publish the agent's plain-text speech to the current conversational locus
+   * (the most recent incoming channel, tracked cross-surface here in the host).
+   * Called by the framework on a text-only turn — replaces the per-surface
+   * sticky auto-post that used to live in discord-mcpl. Returns null when there
+   * is no locus / the channel or its server can't be resolved (in which case
+   * the speech simply stays in chronicle + module surfaces).
+   */
+  async routeSpeech(
+    conversationId: string,
+    text: string,
+  ): Promise<{ delivered: boolean; channelId: string } | null> {
+    const channelId = this.defaultPublishChannel;
+    if (!channelId) return null;
+
+    const entry = this.findChannelEntry(channelId);
+    if (!entry) return null;
+
+    const server = this.serverRegistry.getServer(entry.serverId);
+    if (!server) return null;
+
+    const publishParams: ChannelsPublishParams = {
+      conversationId,
+      channelId,
+      content: [{ type: 'text', text }],
+    };
+    const result = await server.sendChannelsPublish(publishParams);
+
+    this.emitTraceFn({
+      type: 'mcpl:speech-routed',
+      serverId: entry.serverId,
+      channelId,
+      delivered: (result as { delivered?: boolean } | undefined)?.delivered ?? true,
+      textLen: text.length,
+    });
+
+    return { delivered: true, channelId };
   }
 
   private async handleToolPublish(input: { channelId?: string; content?: string; text?: string }): Promise<ToolResult> {

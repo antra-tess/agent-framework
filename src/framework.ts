@@ -2041,6 +2041,28 @@ export class AgentFramework {
               );
             }
 
+            // Host-owned output routing (see LOCUS-ROUTING-DESIGN). On a
+            // text-only turn (no tool calls => speechContent populated),
+            // publish the agent's speech to the conversational locus — the
+            // most recent incoming channel, tracked cross-surface in the
+            // ChannelRegistry. This replaces discord-mcpl's per-surface sticky
+            // auto-post. Tool-call turns produce `thoughts`, not `speech`, so
+            // they are never routed here — which is precisely how the `think`
+            // tool (and any explicit send tool) yields a silent turn.
+            if (speechContent.length > 0 && this.channelRegistry) {
+              const speechText = speechContent
+                .map((b) => (b as ContentBlock & { type: 'text' }).text)
+                .join('\n')
+                .trim();
+              if (speechText) {
+                try {
+                  await this.channelRegistry.routeSpeech(agent.name, speechText);
+                } catch (err) {
+                  console.error('speech routing failed:', err);
+                }
+              }
+            }
+
             // Done — reset to idle
             agent.reset();
             this.eventGate?.onInferenceEnded(agent.name);
@@ -2315,6 +2337,14 @@ export class AgentFramework {
     // Route gate:status tool
     if (enrichedCall.name === 'gate:status' && this.eventGate) {
       this.dispatchGateToolCall(agentName, enrichedCall);
+      return;
+    }
+
+    // Route synthesized 'think' tool (deliberation / stay-silent) — handled by
+    // the channel registry like the other synthesized channel tools, but it
+    // isn't `channel_`-prefixed so it needs an explicit route here.
+    if (enrichedCall.name === 'think' && this.channelRegistry) {
+      this.dispatchChannelToolCall(agentName, enrichedCall);
       return;
     }
 
