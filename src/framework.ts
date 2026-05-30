@@ -2061,6 +2061,23 @@ export class AgentFramework {
                   console.error('speech routing failed:', err);
                 }
               }
+            } else if (this.channelRegistry && hadToolCalls && allText.length > 0) {
+              // Diagnostic: the turn produced prose AND a tool call, so the prose
+              // is classified as `thoughts` (not speech) and is NOT routed to any
+              // channel — the turn is silent on Discord. This is the most common
+              // "why didn't it reply?" cause under host-owned routing. Surface it
+              // so that decision is visible instead of a mystery.
+              const t = allText
+                .map((b) => (b as ContentBlock & { type: 'text' }).text)
+                .join('\n')
+                .trim();
+              if (t) {
+                console.error(
+                  `[routing] ${agent.name}: ${t.length} chars of text accompanied a tool call -> ` +
+                  `classified as thoughts, NOT routed (silent turn). To reply, speak on a turn ` +
+                  `with no tool call (or use channel_publish).`,
+                );
+              }
             }
 
             // Done — reset to idle

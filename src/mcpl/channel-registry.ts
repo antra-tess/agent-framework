@@ -932,13 +932,22 @@ export class ChannelRegistry {
     text: string,
   ): Promise<{ delivered: boolean; channelId: string } | null> {
     const channelId = this.defaultPublishChannel;
-    if (!channelId) return null;
+    if (!channelId) {
+      console.error(`[routeSpeech] ${conversationId}: no locus (defaultPublishChannel null) — speech NOT routed (${text.length} chars stay in chronicle)`);
+      return null;
+    }
 
     const entry = this.findChannelEntry(channelId);
-    if (!entry) return null;
+    if (!entry) {
+      console.error(`[routeSpeech] ${conversationId}: no registered channel for locus "${channelId}" — speech NOT routed`);
+      return null;
+    }
 
     const server = this.serverRegistry.getServer(entry.serverId);
-    if (!server) return null;
+    if (!server) {
+      console.error(`[routeSpeech] ${conversationId}: server "${entry.serverId}" not found — speech NOT routed`);
+      return null;
+    }
 
     const publishParams: ChannelsPublishParams = {
       conversationId,
@@ -946,12 +955,14 @@ export class ChannelRegistry {
       content: [{ type: 'text', text }],
     };
     const result = await server.sendChannelsPublish(publishParams);
+    const delivered = (result as { delivered?: boolean } | undefined)?.delivered ?? true;
 
+    console.error(`[routeSpeech] ${conversationId}: routed ${text.length} chars -> ${channelId} (server=${entry.serverId}, delivered=${delivered})`);
     this.emitTraceFn({
       type: 'mcpl:speech-routed',
       serverId: entry.serverId,
       channelId,
-      delivered: (result as { delivered?: boolean } | undefined)?.delivered ?? true,
+      delivered,
       textLen: text.length,
     });
 
